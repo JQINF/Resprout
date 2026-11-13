@@ -1,0 +1,12 @@
+private/
+node_modules/
+dist/
+coverage/
+*.log
+*.tgz
+.npmrc
+.env
+.env.*
+sessions/
+.resprout/
+.DS_Store
