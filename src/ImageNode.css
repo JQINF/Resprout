@@ -1,13 +1,13 @@
+.image-node { min-height: 0; }
 .image-card { padding: 0; overflow: hidden; background: #f8faf8; }
-.image-header { display: flex; align-items: center; gap: 9px; padding: 11px 13px; border-bottom: 1px solid #dfe7df; }
-.image-header strong { overflow: hidden; color: #344b3a; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.image-file-mark { display: grid; flex: 0 0 34px; place-items: center; width: 34px; height: 25px; border: 1px solid #c6d6c8; border-radius: 7px; color: #4f805e; background: #edf5ee; font-size: 9px; font-weight: 750; }
-.image-preview { display: grid; flex: 1; min-height: 0; place-items: center; overflow: hidden; background: #e9eee9; }
-.image-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.image-preview { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #e9eee9; }
+.image-preview img { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; user-select: none; -webkit-user-drag: none; }
+.image-select-surface { position: absolute; inset: 0; z-index: 4; cursor: crosshair; touch-action: none; }
+.image-selection-box { position: absolute; z-index: 5; border: 1.5px solid rgba(69, 137, 86, 0.9); border-radius: 5px; background: rgba(102, 167, 117, 0.14); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65); pointer-events: none; }
 .image-status { padding: 24px; color: #819087; font-size: 12px; text-align: center; }
-.image-question { display: flex; gap: 7px; padding: 10px 12px; border-top: 1px solid #dfe7df; }
-.image-question input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid #ccdacc; border-radius: 8px; outline: none; color: #344b3a; background: rgba(255, 255, 255, 0.7); font-size: 12px; }
-.image-question input:focus { border-color: #7d9e85; box-shadow: 0 0 0 3px rgba(79, 128, 94, 0.1); }
-.image-question button { padding: 8px 13px; border: 1px solid #477a56; border-radius: 8px; color: #fff; background: linear-gradient(145deg, #679a73, #376c49); cursor: pointer; font-size: 12px; }
+.image-quote-popup { z-index: 1200; width: 380px; }
 .image-capability { padding: 0 12px 9px; color: #6f8f77; font-size: 10px; }
 .image-capability.warning { color: #a17c56; }
+@media (max-width: 650px) {
+  .image-quote-popup { width: min(380px, calc(100vw - 24px)); }
+}
