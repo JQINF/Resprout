@@ -11,6 +11,8 @@ interface NodeResizeCornersProps {
   minWidth?: number;
   minHeight?: number;
   aspectRatio?: number;
+  /** 交互节点状态条（错误条）占位高度：角部缩放时计入，保持 iframe 3:2。 */
+  resizeInset?: number;
   onResizeStart?: () => void;
   onResizeEnd?: () => void;
   onResize?: (width: number, height: number) => void;
@@ -27,7 +29,7 @@ function cssSize(value: CSSProperties['width'] | CSSProperties['height']): numbe
   return undefined;
 }
 
-export default function NodeResizeCorners({ id, minWidth, minHeight, aspectRatio, onResizeStart, onResizeEnd, onResize }: NodeResizeCornersProps) {
+export default function NodeResizeCorners({ id, minWidth, minHeight, aspectRatio, resizeInset, onResizeStart, onResizeEnd, onResize }: NodeResizeCornersProps) {
   const { getViewport } = useReactFlow();
 
   function startResize(event: ReactPointerEvent<HTMLSpanElement>, direction: ResizeDirection): void {
@@ -70,7 +72,7 @@ export default function NodeResizeCorners({ id, minWidth, minHeight, aspectRatio
       width = Math.max(minimumWidth, startWidth + (direction.includes('right') ? dx : direction.includes('left') ? -dx : 0));
       height = Math.max(minimumHeight, startHeight + (direction.includes('bottom') ? dy : direction.includes('top') ? -dy : 0));
       if (node.data.role === 'interactive') {
-        const next = interactiveFreeSize(width, height);
+        const next = interactiveFreeSize(width, height, resizeInset ?? 0);
         width = next.width;
         height = next.height;
       } else if (aspectRatio && Number.isFinite(aspectRatio) && aspectRatio > 0) {

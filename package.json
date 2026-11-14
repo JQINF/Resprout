@@ -1,6 +1,6 @@
 {
   "name": "resprout",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "description": "A canvas for divergent learning. Branch from curiosity and build your own map of understanding.",
   "type": "module",
   "license": "MIT",
@@ -37,6 +37,10 @@
     "build": "npm run typecheck && vite build && tsc -p tsconfig.node.json",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit && npm run test:browser",
+    "test:unit": "node --test tests/unit/*.test.ts",
+    "test:browser": "node tests/browser/run.ts",
+    "test:baseline": "node tests/browser/run.ts --check-baseline",
     "prepack": "npm run build"
   },
   "dependencies": {

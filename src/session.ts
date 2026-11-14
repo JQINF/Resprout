@@ -1,4 +1,5 @@
 import type { Edge, Node } from '@xyflow/react';
+import type { TechnicalStatus } from './interactive-validation.ts';
 
 export type EdgeKind = 'derive' | 'probe' | 'challenge' | 'belong';
 const EDGE_KINDS: ReadonlySet<string> = new Set(['derive', 'probe', 'challenge', 'belong']);
@@ -9,25 +10,113 @@ export interface NodeSize {
 }
 
 export const DEFAULT_ANSWER_SIZE: NodeSize = { width: 720, height: 480 };
+/**
+ * 3:2 指左侧生成内容 iframe 的实际 CSS 内容视口宽高比，
+ * 不包含右侧知识说明、分隔条、卡片边框与宿主状态条。
+ */
 export const INTERACTIVE_ASPECT_RATIO = 3 / 2;
 export const DEFAULT_INTERACTIVE_SPLIT_RATIO = 0.62;
-const INTERACTIVE_RIGHT_SPACE = 254;
+const INTERACTIVE_SPLIT_MIN = 0.35;
+const INTERACTIVE_SPLIT_MAX = 0.75;
+/** 宿主卡片（card-surface）左右/上下边框合计。 */
+export const INTERACTIVE_CARD_BORDER = 2;
+/** 分栏分隔条占位。 */
+export const INTERACTIVE_DIVIDER_WIDTH = 14;
+/** 右侧知识说明可读最小宽度。 */
+export const INTERACTIVE_MIN_EXPLANATION_WIDTH = 220;
+/** 低于该 iframe 视口尺寸时宿主限制继续缩小；布局回归覆盖 480×320 及以上。 */
+export const INTERACTIVE_MIN_FRAME_WIDTH = 360;
+export const INTERACTIVE_MIN_FRAME_HEIGHT = 240;
+/** 运行错误条占位高度；错误条出现时节点高度同步增加，iframe 保持 3:2。 */
+export const INTERACTIVE_ERROR_BAR_INSET = 32;
 
-export function interactiveNodeSize(width: number, splitRatio = DEFAULT_INTERACTIVE_SPLIT_RATIO): NodeSize {
-  const outerRatio = INTERACTIVE_ASPECT_RATIO / splitRatio;
-  let nextWidth = Math.max(320, width, INTERACTIVE_RIGHT_SPACE / (1 - splitRatio));
-  let nextHeight = nextWidth / outerRatio;
-  if (nextHeight < 240) {
-    nextHeight = 240;
-    nextWidth = nextHeight * outerRatio;
-  }
-  return { width: Math.round(nextWidth), height: Math.round(nextHeight) };
+export interface InteractiveViewportPlan {
+  nodeWidth: number;
+  nodeHeight: number;
+  /** iframe 内容视口（CSS 像素），恒定满足 width/height ≈ INTERACTIVE_ASPECT_RATIO。 */
+  frameWidth: number;
+  frameHeight: number;
+  explanationWidth: number;
 }
 
-export function interactiveFreeSize(width: number, height: number): NodeSize {
-  const nextHeight = Math.max(240, height);
-  const minWidth = nextHeight * INTERACTIVE_ASPECT_RATIO + INTERACTIVE_RIGHT_SPACE;
-  return { width: Math.round(Math.max(320, width, minWidth)), height: Math.round(nextHeight) };
+function clampSplitRatio(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_INTERACTIVE_SPLIT_RATIO;
+  return Math.min(INTERACTIVE_SPLIT_MAX, Math.max(INTERACTIVE_SPLIT_MIN, value));
+}
+
+function round1(value: number): number {
+  return Math.round(value);
+}
+
+/** 由节点外宽推导整张计划：iframe 宽度 = 内容宽 × 占比，高度 = 宽度 × 2/3，节点高度补齐装饰。 */
+export function interactiveViewportPlan(nodeWidth: number, splitRatio = DEFAULT_INTERACTIVE_SPLIT_RATIO, topInset = 0): InteractiveViewportPlan {
+  const split = clampSplitRatio(splitRatio);
+  const inset = Math.max(0, round1(topInset));
+  const minNodeWidth = Math.max(
+    INTERACTIVE_MIN_FRAME_WIDTH / split,
+    (INTERACTIVE_MIN_EXPLANATION_WIDTH + INTERACTIVE_DIVIDER_WIDTH + INTERACTIVE_CARD_BORDER) / (1 - split),
+  ) + INTERACTIVE_CARD_BORDER;
+  const width = Math.max(320, round1(nodeWidth), round1(minNodeWidth));
+  const innerWidth = width - INTERACTIVE_CARD_BORDER;
+  const frameWidth = round1(innerWidth * split);
+  const frameHeight = Math.max(INTERACTIVE_MIN_FRAME_HEIGHT, round1(frameWidth / INTERACTIVE_ASPECT_RATIO));
+  const nodeHeight = frameHeight + INTERACTIVE_CARD_BORDER + inset;
+  return {
+    nodeWidth: width,
+    nodeHeight,
+    frameWidth,
+    frameHeight,
+    explanationWidth: innerWidth - frameWidth - INTERACTIVE_DIVIDER_WIDTH,
+  };
+}
+
+/** 由目标 iframe 高度反推节点尺寸（角部缩放等“高度驱动”路径）。 */
+function interactivePlanFromHeight(nodeHeight: number, splitRatio: number, topInset: number): InteractiveViewportPlan {
+  const split = clampSplitRatio(splitRatio);
+  const inset = Math.max(0, round1(topInset));
+  const frameHeight = Math.max(INTERACTIVE_MIN_FRAME_HEIGHT, round1(nodeHeight - INTERACTIVE_CARD_BORDER - inset));
+  const frameWidth = round1(frameHeight * INTERACTIVE_ASPECT_RATIO);
+  const innerWidth = frameWidth / split;
+  const width = Math.max(
+    320,
+    round1(innerWidth + INTERACTIVE_CARD_BORDER),
+    round1((INTERACTIVE_MIN_EXPLANATION_WIDTH + INTERACTIVE_DIVIDER_WIDTH + INTERACTIVE_CARD_BORDER) / (1 - split) + INTERACTIVE_CARD_BORDER),
+  );
+  return {
+    nodeWidth: width,
+    nodeHeight: frameHeight + INTERACTIVE_CARD_BORDER + inset,
+    frameWidth,
+    frameHeight,
+    explanationWidth: round1(width - INTERACTIVE_CARD_BORDER) - frameWidth - INTERACTIVE_DIVIDER_WIDTH,
+  };
+}
+
+export function interactiveNodeSize(width: number, splitRatio = DEFAULT_INTERACTIVE_SPLIT_RATIO, topInset = 0): NodeSize {
+  const plan = interactiveViewportPlan(width, splitRatio, topInset);
+  return { width: plan.nodeWidth, height: plan.nodeHeight };
+}
+
+/**
+ * 角部缩放等自由尺寸路径：宽高两个候选都保持 iframe 3:2 与右栏最小宽度，
+ * 选择偏离用户拖动结果较小的方案，保证水平与垂直拖动都有效。
+ */
+export function interactiveFreeSize(width: number, height: number, topInset = 0): NodeSize {
+  const fromHeight = interactivePlanFromHeight(height, DEFAULT_INTERACTIVE_SPLIT_RATIO, topInset);
+  const fromWidth = interactiveViewportPlan(width, DEFAULT_INTERACTIVE_SPLIT_RATIO, topInset);
+  const heightDrivenOffset = Math.abs(fromHeight.nodeWidth - width);
+  const widthDrivenOffset = Math.abs(fromWidth.nodeHeight - height);
+  const plan = heightDrivenOffset <= widthDrivenOffset ? fromHeight : fromWidth;
+  return { width: plan.nodeWidth, height: plan.nodeHeight };
+}
+
+/** 从既有节点尺寸反推分栏占比（挂载、存档恢复、角部缩放时保持用户分配）。 */
+export function interactiveSplitFromSize(nodeWidth: number, nodeHeight: number, topInset = 0): number {
+  const inset = Math.max(0, round1(topInset));
+  const innerWidth = nodeWidth - INTERACTIVE_CARD_BORDER;
+  if (innerWidth <= 0) return DEFAULT_INTERACTIVE_SPLIT_RATIO;
+  const frameHeight = nodeHeight - INTERACTIVE_CARD_BORDER - inset;
+  if (frameHeight <= 0) return DEFAULT_INTERACTIVE_SPLIT_RATIO;
+  return clampSplitRatio((frameHeight * INTERACTIVE_ASPECT_RATIO) / innerWidth);
 }
 
 export const DEFAULT_INTERACTIVE_SIZE = interactiveNodeSize(960);
@@ -110,6 +199,14 @@ export interface GenerationDiagnostic {
   attempts: number;
   durationMs: number;
   summary: string;
+  technicalStatus?: TechnicalStatus;
+  runId?: string;
+  candidateHash?: string;
+  counters?: {
+    modelCalls: number;
+    repairs: number;
+    checks: number;
+  };
 }
 
 export type ReviewStatus = 'reviewed' | 'skipped' | 'failed';
@@ -134,12 +231,17 @@ export type ConversationNodeData = {
   explanation?: string;
   prompt?: string | null;
   usage?: Usage | null;
-  reviewing?: boolean;
-  reviewAttempt?: number;
+  /** 正在生成的阶段：generation → check → repair；仅进行中显示。 */
+  phase?: 'generation' | 'check' | 'repair';
   previewContent?: string;
   fallback?: boolean;
   reviewStatus?: ReviewStatus;
   generationDiagnostic?: GenerationDiagnostic | null;
+  technicalStatus?: TechnicalStatus;
+  recoveryStatus?: 'verified' | 'unverified' | 'rejected';
+  reviewAdvisories?: string[];
+  issueCodes?: string[];
+  cancelled?: boolean;
   highlights?: Highlight[];
   autoFocus?: boolean;
 };
@@ -171,7 +273,7 @@ export interface SessionSnapshot {
   edges: ConversationEdge[];
 }
 
-export type ExportNodeStatus = 'interrupted' | 'fallback' | 'failed' | 'ready';
+export type ExportNodeStatus = 'interrupted' | 'fallback' | 'failed' | 'unverified' | 'ready';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -223,13 +325,19 @@ export function exportSessionSnapshot(session: Session, nodes: ConversationNode[
           ? 'fallback'
           : node.data.error
             ? 'failed'
-            : 'ready';
+            : node.data.technicalStatus && node.data.technicalStatus !== 'pass'
+              ? 'unverified'
+              : 'ready';
       return {
         id: node.id,
         type: node.data.nodeType,
         role: node.data.role ?? 'user',
         status,
         summary: node.data.generationDiagnostic?.summary ?? '',
+        technicalStatus: node.data.technicalStatus ?? null,
+        recoveryStatus: node.data.recoveryStatus ?? null,
+        reviewStatus: node.data.reviewStatus ?? null,
+        reviewAdvisories: node.data.reviewAdvisories ?? [],
         content: node.data.content,
         title: node.data.title ?? null,
         fileId: node.data.fileId ?? null,
@@ -331,7 +439,21 @@ export function importSession(text: string): SessionSnapshot {
       const interactive = role === 'interactive';
       const reference = role === 'reference';
       const summary = typeof node.summary === 'string' ? node.summary : '';
-      const status = node.status === 'fallback' || node.status === 'failed' || node.status === 'interrupted' ? node.status : null;
+      const status = node.status === 'fallback' || node.status === 'failed' || node.status === 'interrupted' || node.status === 'unverified'
+        ? node.status
+        : null;
+      const technicalStatus: TechnicalStatus | undefined = node.technicalStatus === 'pass' || node.technicalStatus === 'fail' || node.technicalStatus === 'inconclusive'
+        ? node.technicalStatus
+        : status === 'unverified' ? 'inconclusive' : undefined;
+      const recoveryStatus = node.recoveryStatus === 'verified' || node.recoveryStatus === 'unverified' || node.recoveryStatus === 'rejected'
+        ? node.recoveryStatus
+        : undefined;
+      const reviewStatus: ReviewStatus | undefined = node.reviewStatus === 'reviewed' || node.reviewStatus === 'skipped' || node.reviewStatus === 'failed'
+        ? node.reviewStatus
+        : undefined;
+      const reviewAdvisories = Array.isArray(node.reviewAdvisories)
+        ? node.reviewAdvisories.filter((item): item is string => typeof item === 'string').slice(0, 20)
+        : [];
       return {
         id: imported.id,
         type: interactive ? 'interactive' : reference ? (node.assetKind === 'image' ? 'image' : 'pdf') : 'conversation',
@@ -360,12 +482,15 @@ export function importSession(text: string): SessionSnapshot {
           model: isModelSelection(node.model) ? node.model : null,
           usage: isUsage(node.usage) ? node.usage : null,
           pending: false,
-          reviewing: false,
-          reviewAttempt: 0,
+          phase: undefined,
           previewContent: '',
           fallback: status === 'fallback',
           error: status === 'failed' ? (summary || '此卡片上次生成失败，请重新生成') : status === 'interrupted' ? '生成在会话保存时中断，请重新生成' : '',
-          generationDiagnostic: summary ? { stage: 'restored', attempts: 0, durationMs: 0, summary } : null,
+          generationDiagnostic: summary ? { stage: 'restored', attempts: 0, durationMs: 0, summary, ...(technicalStatus ? { technicalStatus } : {}) } : null,
+          technicalStatus,
+          recoveryStatus,
+          reviewStatus,
+          reviewAdvisories,
           createdAt: isFiniteNumber(node.createdAt) ? node.createdAt : Date.now(),
           highlights: sanitizeHighlights(node.highlights),
         },

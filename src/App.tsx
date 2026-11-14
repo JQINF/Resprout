@@ -53,7 +53,7 @@ import type { BranchMainlineItem, BranchSideItem, BranchTree } from './branch-ma
 import { readPdfFile } from './pdf-store.ts';
 import { clusterLineRects, textRangeRects, normalizedRangeStart } from './text-selection.ts';
 import type { RectLike } from './text-selection.ts';
-import { useStore } from './store.ts';
+import { cacheCurrentSession, cachedSession, useStore } from './store.ts';
 import type {
   Anchor,
   ConversationEdge,
@@ -2315,6 +2315,7 @@ function Workspace({ onHome }: { onHome: () => void }) {
   async function open(file: File | undefined) {
     if (!file) return;
     try {
+      cacheCurrentSession();
       useStore.getState().loadSession(importSession(await file.text()));
       setMessage(`已从 ${file.name} 恢复`);
     } catch (error) {
@@ -2450,12 +2451,14 @@ export default function App() {
   const [page, setPage] = useState<'home' | 'workspace'>('home');
 
   function newSession() {
+    cacheCurrentSession();
     useStore.getState().loadSession({ session: createSession(), nodes: [], edges: [] });
     setPage('workspace');
   }
 
   function openSession(id: string) {
-    useStore.getState().loadSession(importSession(readSessionRecord(id)));
+    cacheCurrentSession();
+    useStore.getState().loadSession(cachedSession(id) ?? importSession(readSessionRecord(id)));
     setPage('workspace');
   }
 

@@ -330,6 +330,7 @@ export async function streamChat(
   onEvent: (event: ChatStreamEvent) => void,
   model: ChatModelRef | null = null,
   options: ChatOptions = {},
+  signal?: AbortSignal,
 ): Promise<void> {
   const body: ChatRequestBody = {
     messages,
@@ -341,6 +342,7 @@ export async function streamChat(
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   });
   if (!response.ok) throw new Error(await responseError(response));
   if (!response.body) throw new Error('浏览器不支持流式响应');

@@ -27,9 +27,21 @@ import type { QuickAction } from './quick-actions.ts';
 import { contextBudgetFor, fitMessagesToBudget } from './context-budget.ts';
 import type { PromptMessage } from './context-budget.ts';
 import { prepareImageMessages } from './image-content.ts';
-import { buildInteractiveInstruction, extractInteractivePreview, fallbackInteractiveResult, requestInteractiveHtml } from './interactive-generation.ts';
-import type { InteractiveResult, InteractiveStage } from './interactive-generation.ts';
-import { canCreateFollowupFrom, createSession, DEFAULT_ANSWER_SIZE, DEFAULT_INTERACTIVE_SIZE } from './session.ts';
+import {
+  buildInteractiveInstruction,
+  fallbackInteractiveResult,
+  interactiveAbortError,
+  isInteractiveAbortLike,
+  readinessToTechnicalStatus,
+  requestInteractiveHtml,
+} from './interactive-generation.ts';
+import { extractGenerationPreview } from './interactive-json.ts';
+import type { FallbackInteractiveResult, InteractiveResult, InteractiveStage } from './interactive-generation.ts';
+import { DiagnosticBundleStore } from './interactive-diagnostics.ts';
+import { checkInteractiveReadiness } from './interactive-runtime.ts';
+import { assessLegacyCard } from './interactive-validation.ts';
+import type { TechnicalStatus } from './interactive-validation.ts';
+import { canCreateFollowupFrom, createSession, DEFAULT_ANSWER_SIZE, DEFAULT_INTERACTIVE_SIZE, exportSessionSnapshot } from './session.ts';
 import type {
   Anchor,
   ConversationEdge,
@@ -48,13 +60,25 @@ import type {
   Usage,
 } from './session.ts';
 import { deletePdfFile, savePdfFile } from './pdf-store.ts';
+import { saveSessionSnapshot } from './session-library.ts';
 
 const NODE_GAP = 40;
+const interactiveDiagnostics = new DiagnosticBundleStore(24);
+const generationControllers = new Map<string, { controller: AbortController; runId: string }>();
 
 export type ProviderKind = PublicProvider['kind'];
 export type ProviderInfo = PublicProvider;
 export type SearchSource = NonNullable<SearchConfig['source']>;
 export type { ProviderState, SaveProviderInput, SaveSearchConfigInput, SearchConfig } from './api.ts';
+
+export type GenerationRunKind = 'answer' | 'interactive';
+
+export interface GenerationRun {
+  sessionId: string;
+  nodeId: string;
+  kind: GenerationRunKind;
+  runId: string;
+}
 
 export interface HighlightMetadata {
   pageNumber?: number;
@@ -103,6 +127,7 @@ export interface ResproutStore {
   searchConfig: SearchConfig;
   webSearchEnabled: boolean;
   quickActions: QuickAction[];
+  generationRuns: Record<string, GenerationRun>;
 
   setQuickActions(value: QuickAction[] | ((actions: QuickAction[]) => QuickAction[])): void;
   loadProviders(): Promise<void>;
@@ -122,6 +147,8 @@ export interface ResproutStore {
   generateInteractive(sourceId: string, flowPosition: XYPosition, existingId?: string | null, selection?: InteractiveSelection | null): Promise<void>;
   generateInteractiveFromRequest(id: string): Promise<void>;
   regenerateInteractive(id: string): Promise<void>;
+  cancelInteractiveGeneration(id: string): void;
+  exportInteractiveDiagnostic(id: string): { json: string; filename: string; bytes: number; truncated: boolean } | null;
   sendMessage(id: string): Promise<void>;
   onNodesChange(changes: NodeChange<ConversationNode>[]): void;
   onEdgesChange(changes: EdgeChange<ConversationEdge>[]): void;
@@ -156,9 +183,10 @@ function errorMessage(error: unknown): string {
 function interactiveErrorStage(error: unknown): InteractiveStage {
   if (isRecord(error)) {
     const stage = error.stage;
-    if (stage === 'generation' || stage === 'review' || stage === 'runtime' || stage === 'provider' || stage === 'done') return stage;
+    if (stage === 'generation' || stage === 'check' || stage === 'repair' || stage === 'provider'
+      || stage === 'protocol' || stage === 'done' || stage === 'cancelled') return stage;
   }
-  return 'generation';
+  return 'provider';
 }
 
 function numericStyleDimension(value: unknown, fallback: number): number {
@@ -342,6 +370,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
   searchConfig: { available: false, source: null },
   webSearchEnabled: loadWebSearchEnabled(),
   quickActions: loadQuickActions(),
+  generationRuns: {},
 
   setQuickActions(value) {
     set(state => ({
@@ -665,6 +694,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
 
   async generateInteractive(sourceId, flowPosition, existingId = null, selection = null) {
     const current = get();
+    const sessionId = current.session.id;
     const source = current.nodes.find(node => node.id === sourceId);
     const existing = existingId ? current.nodes.find(node => node.id === existingId && node.data.role === 'interactive') : null;
     if (!source || (existingId && (!existing || existing.data.pending))) return;
@@ -693,10 +723,31 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       ? current.providers.find(provider => provider.id === selectedModel.providerId)?.modelContexts?.[selectedModel.modelId]
       : undefined;
     messages = fitMessagesToBudget(messages, { budget: contextBudgetFor('interactive', contextWindow) });
+
+    const previousResult = existing?.data.content ? {
+      content: existing.data.content,
+      explanation: existing.data.explanation,
+      reviewStatus: existing.data.reviewStatus,
+      technicalStatus: existing.data.technicalStatus,
+    } : null;
+
     if (existing) {
       set(state => ({
         nodes: state.nodes.map((node): ConversationNode => node.id === id
-          ? { ...node, data: { ...node.data, pending: true, error: '', reviewing: false, fallback: false, generationDiagnostic: null, model: selectedModel } }
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                pending: true,
+                error: '',
+                phase: 'generation',
+                fallback: false,
+                cancelled: false,
+                generationDiagnostic: null,
+                issueCodes: [],
+                model: selectedModel,
+              },
+            }
           : node),
       }));
     } else {
@@ -709,8 +760,9 @@ export const useStore = create<ResproutStore>()((set, get) => ({
           model: selectedModel,
           pending: true,
           error: '',
-          reviewing: false,
+          phase: 'generation',
           fallback: false,
+          cancelled: false,
           generationDiagnostic: null,
           createdAt: Date.now(),
         };
@@ -727,7 +779,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
           target: id,
           type: 'thinking',
           data: {
-            kind: selection?.kind ?? 'derive',
+            kind: selection?.kind ?? 'probe',
             thinking: '',
             streaming: false,
             error: '',
@@ -740,114 +792,203 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       });
     }
 
-    const previousResult = existing?.data.content ? {
-      content: existing.data.content,
-      explanation: existing.data.explanation,
-    } : null;
+    const { runId, signal } = beginGeneration(sessionId, id, 'interactive');
+    const diagnosticKey = `${sessionId}:${id}`;
+    interactiveDiagnostics.delete(diagnosticKey);
+    const isCurrentRun = (): boolean => isCurrentGeneration(sessionId, id, 'interactive', runId);
+    const updateNode = (patch: Partial<ConversationNodeData>): void => {
+      if (!isCurrentRun()) return;
+      updateGenerationSession(sessionId, state => ({
+        ...state,
+        nodes: state.nodes.map((node): ConversationNode => node.id === id
+          ? { ...node, data: { ...node.data, ...patch } }
+          : node),
+      }));
+    };
     let previewUpdatedAt = 0;
     const updatePreview = (output: string): void => {
+      if (signal.aborted) return;
       const now = Date.now();
       if (now - previewUpdatedAt < 160) return;
       previewUpdatedAt = now;
-      const previewContent = extractInteractivePreview(output);
+      const previewContent = extractGenerationPreview(output);
       if (!previewContent) return;
-      set(state => ({
-        nodes: state.nodes.map((node): ConversationNode => node.id === id
-          ? { ...node, data: { ...node.data, previewContent } }
-          : node),
-      }));
+      updateNode({ previewContent });
     };
     const startedAt = Date.now();
-    const finishFailure = (result: InteractiveResult): void => {
-      set(state => ({
-        nodes: state.nodes.map((node): ConversationNode => node.id === id
-          ? {
-              ...node,
-              data: previousResult ? {
-                ...node.data,
-                content: previousResult.content,
-                explanation: previousResult.explanation,
-                previewContent: '',
-                pending: false,
-                reviewing: false,
-                reviewAttempt: 0,
-                fallback: false,
-                reviewStatus: result.reviewStatus,
-                generationDiagnostic: result.diagnostic,
-                error: '',
-              } : {
-                ...node.data,
-                content: '',
-                explanation: result.explanation,
-                previewContent: '',
-                pending: false,
-                reviewing: false,
-                reviewAttempt: 0,
-                fallback: true,
-                reviewStatus: 'failed',
-                generationDiagnostic: result.diagnostic,
-                error: '',
-              },
-            }
-          : node),
-      }));
+
+    const finishFailure = async (result: FallbackInteractiveResult): Promise<void> => {
+      if (!isCurrentRun()) return;
+      let retained: {
+        content: string;
+        explanation: string | undefined;
+        technical: TechnicalStatus;
+        assessment: ReturnType<typeof assessLegacyCard>;
+      } | null = null;
+      if (previousResult) {
+        // 保留旧内容时不做完整契约验收，只做轻量运行检查；不伪称旧内容刚通过新检查。
+        const readiness = signal.aborted
+          ? null
+          : await checkInteractiveReadiness(previousResult.content, {
+            runId,
+            signal,
+            limits: { totalTimeoutMs: 7000, loadTimeoutMs: 3000 },
+          }).catch(() => null);
+        const reviewPassed = previousResult.reviewStatus === 'reviewed'
+          ? true
+          : previousResult.reviewStatus === 'failed' ? false : null;
+        const technical = readiness ? readinessToTechnicalStatus(readiness.status) : 'inconclusive';
+        retained = {
+          content: previousResult.content,
+          explanation: previousResult.explanation,
+          technical,
+          assessment: assessLegacyCard({ hasContent: true, technical, reviewPassed }),
+        };
+      }
+      if (!isCurrentRun()) return;
+      const issueCodes = result.issues.map(issue => issue.code).slice(0, 12);
+      if (retained) {
+        updateNode({
+          content: retained.content,
+          explanation: retained.explanation,
+          previewContent: '',
+          pending: false,
+          phase: undefined,
+          fallback: false,
+          error: '',
+          technicalStatus: retained.technical,
+          recoveryStatus: retained.assessment.status,
+          // 保留旧卡片已有的审核记录；本次运行检查结果由 technicalStatus/recoveryStatus 表达，
+          // 不能用回退覆盖历史审核事实。
+          reviewStatus: previousResult?.reviewStatus,
+          generationDiagnostic: {
+            ...result.diagnostic,
+            technicalStatus: retained.technical,
+            summary: `重新生成失败，已保留旧版本：${retained.assessment.reason}；${result.diagnostic.summary}`.slice(0, 400),
+          },
+          issueCodes,
+          cancelled: signal.aborted,
+        });
+      } else {
+        updateNode({
+          content: '',
+          explanation: result.explanation,
+          previewContent: '',
+          pending: false,
+          phase: undefined,
+          fallback: true,
+          error: '',
+          reviewStatus: 'failed',
+          technicalStatus: result.technicalStatus,
+          recoveryStatus: undefined,
+          generationDiagnostic: result.diagnostic,
+          issueCodes,
+          cancelled: signal.aborted,
+        });
+      }
     };
+
     let generated: InteractiveResult | null = null;
     try {
       generated = await requestInteractiveHtml(messages, selectedModel, {
+        signal,
         onDelta: updatePreview,
-        onCandidate: (content, diagnostic) => {
-          set(state => ({
-            nodes: state.nodes.map((node): ConversationNode => node.id === id
-              ? { ...node, data: { ...node.data, content, reviewing: true, fallback: false, generationDiagnostic: diagnostic } }
-              : node),
-          }));
+        onProgress: ({ phase }) => {
+          if (signal.aborted) return;
+          updateNode({ phase });
         },
-        onReview: reviewAttempt => {
-          set(state => ({
-            nodes: state.nodes.map((node): ConversationNode => node.id === id
-              ? { ...node, data: { ...node.data, reviewing: true, reviewAttempt } }
-              : node),
-          }));
+        onDiagnostics: recorder => {
+          if (!isCurrentRun()) return;
+          const currentSession = useStore.getState().session.id === sessionId;
+          if (currentSession && !useStore.getState().nodes.some(node => node.id === id)) return;
+          interactiveDiagnostics.set(diagnosticKey, recorder);
         },
       });
       if (generated.fallback) {
-        finishFailure(generated);
+        await finishFailure(generated);
         return;
       }
+      if (signal.aborted) throw interactiveAbortError();
       const completed = generated;
-      set(state => ({
-        nodes: state.nodes.map((node): ConversationNode => node.id === id
-          ? {
-              ...node,
-              data: {
-                ...node.data,
-                content: completed.content,
-                explanation: completed.explanation || `### ${topic}`,
-                previewContent: '',
-                pending: false,
-                reviewing: false,
-                reviewAttempt: 0,
-                fallback: false,
-                reviewStatus: completed.reviewStatus,
-                generationDiagnostic: completed.diagnostic,
-                error: '',
-              },
-            }
-          : node),
-      }));
+      updateNode({
+        content: completed.content,
+        explanation: completed.explanation || `### ${topic}`,
+        previewContent: '',
+        pending: false,
+        phase: undefined,
+        fallback: false,
+        error: '',
+        reviewStatus: completed.reviewStatus,
+        technicalStatus: completed.technicalStatus,
+        recoveryStatus: undefined,
+        issueCodes: [],
+        cancelled: false,
+        generationDiagnostic: completed.diagnostic,
+      });
     } catch (error) {
-      finishFailure(fallbackInteractiveResult(messages, topic, {
-        stage: interactiveErrorStage(error),
-        attempts: generated?.diagnostic?.attempts ?? 0,
-        durationMs: Date.now() - startedAt,
-        summary: errorMessage(error).slice(0, 240),
-      }));
+      if (isInteractiveAbortLike(error, signal)) {
+        const cancelled = fallbackInteractiveResult(messages, topic, {
+          stage: 'cancelled',
+          attempts: generated?.diagnostic?.attempts ?? 0,
+          durationMs: Date.now() - startedAt,
+          summary: '交互生成已取消',
+        }, {
+          technicalStatus: previousResult?.technicalStatus ?? 'inconclusive',
+          runId,
+        });
+        if (previousResult) {
+          updateNode({
+            content: previousResult.content,
+            explanation: previousResult.explanation,
+            reviewStatus: previousResult.reviewStatus,
+            technicalStatus: previousResult.technicalStatus,
+            fallback: false,
+            pending: false,
+            phase: undefined,
+            previewContent: '',
+            cancelled: true,
+            generationDiagnostic: {
+              ...cancelled.diagnostic,
+              summary: '重新生成已取消，保留原有内容',
+              ...(previousResult.technicalStatus ? { technicalStatus: previousResult.technicalStatus } : {}),
+            },
+          });
+        } else {
+          updateNode({
+            content: '',
+            explanation: cancelled.explanation,
+            fallback: true,
+            reviewStatus: 'failed',
+            technicalStatus: 'inconclusive',
+            pending: false,
+            phase: undefined,
+            previewContent: '',
+            cancelled: true,
+            generationDiagnostic: cancelled.diagnostic,
+            issueCodes: [],
+          });
+        }
+      } else {
+        await finishFailure(fallbackInteractiveResult(messages, topic, {
+          stage: interactiveErrorStage(error),
+          attempts: generated?.diagnostic?.attempts ?? 0,
+          durationMs: Date.now() - startedAt,
+          summary: errorMessage(error).slice(0, 240),
+        }, {
+          technicalStatus: 'inconclusive',
+          issues: [],
+          runId,
+        }));
+      }
+    } finally {
+      updateNode({ pending: false, phase: undefined, previewContent: '' });
+      finishGeneration(sessionId, id, 'interactive', runId);
     }
   },
 
   async generateInteractiveFromRequest(id) {
     const current = get();
+    const sessionId = current.session.id;
     const request = current.nodes.find(node => node.id === id && node.data.nodeType === 'interactive');
     const sourceEdge = current.edges.find(edge => edge.target === id);
     if (!request || request.data.pending || !request.data.content.trim() || !sourceEdge) return;
@@ -859,13 +1000,18 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     set(state => ({
       nodes: state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, pending: true } } : node),
     }));
-    await get().generateInteractive(id, flowPosition, null, {
-      quote: sourceEdge.data?.quote ?? '',
-      anchor: sourceEdge.data?.anchor ?? null,
-    });
-    set(state => ({
-      nodes: state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, pending: false } } : node),
-    }));
+    try {
+      await get().generateInteractive(id, flowPosition, null, {
+        quote: sourceEdge.data?.quote ?? '',
+        anchor: sourceEdge.data?.anchor ?? null,
+      });
+    } finally {
+      updateGenerationSession(sessionId, state => ({
+        ...state,
+        nodes: state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, pending: false } } : node),
+      }));
+      try { persistGenerationSession(sessionId); } catch {}
+    }
   },
 
   async regenerateInteractive(id) {
@@ -874,6 +1020,28 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     const sourceId = current.edges.find(edge => edge.target === id)?.source;
     if (!node || !sourceId) return;
     await get().generateInteractive(sourceId, node.position, id);
+  },
+
+  cancelInteractiveGeneration(id) {
+    const sessionId = get().session.id;
+    cancelGeneration(sessionId, id, 'interactive');
+    set(state => ({
+      nodes: state.nodes.map((node): ConversationNode => node.id === id
+        ? { ...node, data: { ...node.data, pending: false, phase: undefined, cancelled: true } }
+        : node),
+    }));
+  },
+
+  exportInteractiveDiagnostic(id) {
+    const sessionId = get().session.id;
+    const exported = interactiveDiagnostics.export(`${sessionId}:${id}`);
+    if (!exported) return null;
+    return {
+      json: exported.json,
+      bytes: exported.bytes,
+      truncated: exported.truncated,
+      filename: `resprout-interactive-${id.slice(0, 8)}.json`,
+    };
   },
 
   async sendMessage(id) {
@@ -922,6 +1090,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       return { nodes, edges };
     });
 
+    const { runId: answerRunId } = beginGeneration(sessionId, answerId, 'answer');
     const streamState: { result: ChatResult | null; usage: Usage | null } = { result: null, usage: null };
     let pendingText = '';
     let pendingThinking = '';
@@ -933,8 +1102,9 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       const thinking = pendingThinking;
       pendingText = '';
       pendingThinking = '';
-      if (get().session.id !== sessionId || (!text && !thinking)) return;
-      set(state => ({
+      if (!text && !thinking) return;
+      updateGenerationSession(sessionId, state => ({
+        ...state,
         nodes: text
           ? state.nodes.map((node): ConversationNode => node.id === answerId
             ? { ...node, data: { ...node.data, content: node.data.content + text } }
@@ -956,9 +1126,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         ? await ensureModelInputs(selectedModel)
         : selectedModel ? selectedProvider?.modelInputs?.[selectedModel.modelId] ?? ['text'] : ['text'];
       const messages: ChatMessage[] = await prepareImageMessages(context, modelInputs);
-      if (get().session.id !== sessionId) return;
       await streamChat(messages, (event: ChatStreamEvent) => {
-        if (get().session.id !== sessionId) return;
         if (event.type === 'text_delta') {
           pendingText += event.delta;
           scheduleFlush();
@@ -976,13 +1144,14 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         parentRequestId: parentRequestId ?? undefined,
         conversationContent,
         quickAction: isQuickActionPrompt(source.data.prompt),
-        webSearch: get().webSearchEnabled,
+        webSearch: current.webSearchEnabled,
       });
       flushDeltas();
       if (streamState.result) {
         const result = streamState.result;
         const resolvedUsage = streamState.usage;
-        set(state => ({
+        updateGenerationSession(sessionId, state => ({
+          ...state,
           nodes: state.nodes.map((node): ConversationNode => node.id === answerId
             ? { ...node, data: { ...node.data, content: result.text, usage: resolvedUsage } }
             : node),
@@ -993,9 +1162,9 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       }
     } catch (error) {
       flushDeltas();
-      if (get().session.id !== sessionId) return;
       const message = errorMessage(error);
-      set(state => ({
+      updateGenerationSession(sessionId, state => ({
+        ...state,
         nodes: state.nodes.map((node): ConversationNode => node.id === answerId
           ? { ...node, data: { ...node.data, error: message } }
           : node),
@@ -1005,8 +1174,8 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       }));
     } finally {
       flushDeltas();
-      if (get().session.id !== sessionId) return;
-      set(state => ({
+      updateGenerationSession(sessionId, state => ({
+        ...state,
         nodes: state.nodes.map((node): ConversationNode => node.id === id || node.id === answerId
           ? { ...node, data: { ...node.data, pending: false } }
           : node),
@@ -1014,6 +1183,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
           ? { ...edge, data: { ...edge.data, streaming: false } }
           : edge),
       }));
+      finishGeneration(sessionId, answerId, 'answer', answerRunId);
     }
   },
 
@@ -1037,6 +1207,12 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       nextChanges.push({ id: question.id, type: 'remove' });
     }
     if (removed.size) {
+      const sessionId = get().session.id;
+      for (const nodeId of removed) {
+        cancelGeneration(sessionId, nodeId, 'interactive');
+        cancelGeneration(sessionId, nodeId, 'answer');
+        interactiveDiagnostics.delete(`${sessionId}:${nodeId}`);
+      }
       for (const node of get().nodes) {
         if (removed.has(node.id) && node.data.role === 'reference' && node.data.fileId) void deletePdfFile(node.data.fileId).catch(() => {});
       }
@@ -1105,10 +1281,117 @@ export const useStore = create<ResproutStore>()((set, get) => ({
   },
 
   loadSession(value) {
+    discardedSessions.delete(value.session.id);
+    sessionCache.set(value.session.id, value);
     set({ session: value.session, nodes: pruneOrphanHighlights(value.nodes, value.edges), edges: value.edges });
     void get().reconcileSession();
   },
 }));
+
+const sessionCache = new Map<string, SessionSnapshot>();
+const discardedSessions = new Set<string>();
+
+type SessionState = Pick<ResproutStore, 'session' | 'nodes' | 'edges'>;
+type GenerationSessionUpdate = (state: SessionSnapshot) => SessionSnapshot;
+
+function sessionSnapshot(state: SessionState): SessionSnapshot {
+  return { session: state.session, nodes: state.nodes, edges: state.edges };
+}
+
+function updateGenerationSession(sessionId: string, update: GenerationSessionUpdate): void {
+  if (discardedSessions.has(sessionId)) return;
+  if (useStore.getState().session.id === sessionId) {
+    useStore.setState(state => {
+      const next = update(state);
+      return { session: next.session, nodes: next.nodes, edges: next.edges };
+    });
+    return;
+  }
+  const cached = sessionCache.get(sessionId);
+  if (cached) sessionCache.set(sessionId, update(cached));
+}
+
+function generationRunKey(sessionId: string, nodeId: string, kind: GenerationRunKind): string {
+  return `${sessionId}:${kind}:${nodeId}`;
+}
+
+function beginGeneration(sessionId: string, nodeId: string, kind: GenerationRunKind): { runId: string; signal: AbortSignal } {
+  const key = generationRunKey(sessionId, nodeId, kind);
+  const existing = generationControllers.get(key);
+  if (existing) existing.controller.abort();
+  const controller = new AbortController();
+  const runId = `${kind}:${crypto.randomUUID()}`;
+  generationControllers.set(key, { controller, runId });
+  useStore.setState(state => ({
+    generationRuns: { ...state.generationRuns, [key]: { sessionId, nodeId, kind, runId } },
+  }));
+  return { runId, signal: controller.signal };
+}
+
+function cancelGeneration(sessionId: string, nodeId: string, kind: GenerationRunKind): void {
+  generationControllers.get(generationRunKey(sessionId, nodeId, kind))?.controller.abort();
+}
+
+function abortSessionGenerations(sessionId: string): void {
+  const prefix = `${sessionId}:`;
+  for (const [key, entry] of generationControllers) {
+    if (key.startsWith(prefix)) entry.controller.abort();
+  }
+}
+
+function isCurrentGeneration(sessionId: string, nodeId: string, kind: GenerationRunKind, runId: string): boolean {
+  const entry = generationControllers.get(generationRunKey(sessionId, nodeId, kind));
+  return Boolean(entry && entry.runId === runId);
+}
+
+function persistGenerationSession(sessionId: string): void {
+  if (discardedSessions.has(sessionId)) return;
+  const state = useStore.getState();
+  const snapshot = state.session.id === sessionId ? sessionSnapshot(state) : sessionCache.get(sessionId);
+  if (snapshot?.nodes.length) {
+    saveSessionSnapshot(exportSessionSnapshot(snapshot.session, snapshot.nodes, snapshot.edges));
+  }
+}
+
+function finishGeneration(sessionId: string, nodeId: string, kind: GenerationRunKind, runId: string): void {
+  try {
+    persistGenerationSession(sessionId);
+  } catch {
+  } finally {
+    const key = generationRunKey(sessionId, nodeId, kind);
+    const entry = generationControllers.get(key);
+    if (!entry || entry.runId === runId) generationControllers.delete(key);
+    useStore.setState(state => {
+      const run = state.generationRuns[key];
+      if (run && run.runId !== runId) return state;
+      const generationRuns = { ...state.generationRuns };
+      delete generationRuns[key];
+      return { generationRuns };
+    });
+  }
+}
+
+export function cacheCurrentSession(): void {
+  const state = useStore.getState();
+  if (!discardedSessions.has(state.session.id)) sessionCache.set(state.session.id, sessionSnapshot(state));
+}
+
+export function cachedSession(id: string): SessionSnapshot | null {
+  if (discardedSessions.has(id)) return null;
+  const state = useStore.getState();
+  if (state.session.id === id) return sessionSnapshot(state);
+  return sessionCache.get(id) ?? null;
+}
+
+export function discardSessionCache(id: string): void {
+  discardedSessions.add(id);
+  abortSessionGenerations(id);
+  interactiveDiagnostics.deletePrefix(`${id}:`);
+  sessionCache.delete(id);
+  useStore.setState(state => ({
+    generationRuns: Object.fromEntries(Object.entries(state.generationRuns).filter(([, run]) => run.sessionId !== id)),
+  }));
+}
 
 const edgesBeforeChanges: { current: ConversationEdge[] } = { current: [] };
 

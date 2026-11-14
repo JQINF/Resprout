@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { deleteSessionRecord, listSessionRecords } from './session-library.ts';
 import type { SessionRecord } from './session-library.ts';
+import { discardSessionCache, useStore } from './store.ts';
 import resproutLogo from '../assets/brand/resprout-wordmark-light.png';
 
 interface SessionHomeProps {
@@ -27,6 +28,9 @@ function formatUpdatedAt(value: string): string {
 export default function SessionHome({ onNew, onOpen }: SessionHomeProps) {
   const [records, setRecords] = useState<SessionRecord[]>(listSessionRecords);
   const [error, setError] = useState('');
+  const generationRuns = useStore(state => state.generationRuns);
+
+  useEffect(() => setRecords(listSessionRecords()), [generationRuns]);
 
   function open(id: string) {
     setError('');
@@ -39,6 +43,7 @@ export default function SessionHome({ onNew, onOpen }: SessionHomeProps) {
 
   async function remove(id: string, title: string) {
     if (!window.confirm(`确定删除会话“${title}”？此操作不可撤销。`)) return;
+    discardSessionCache(id);
     await deleteSessionRecord(id);
     setRecords(listSessionRecords());
   }
@@ -62,16 +67,26 @@ export default function SessionHome({ onNew, onOpen }: SessionHomeProps) {
           {error && <div className="settings-error">{error}</div>}
           {records.length ? (
             <div className="history-grid">
-              {records.map(record => (
-                <article className="history-card" key={record.id}>
-                  <button type="button" className="session-open" onClick={() => open(record.id)}>
-                    <strong>{record.title}</strong>
-                    {record.preview && <span className="session-preview">{record.preview}</span>}
-                    <span className="session-meta">{formatUpdatedAt(record.updatedAt)} · {record.nodeCount} 个节点</span>
-                  </button>
-                  <button type="button" className="session-delete" aria-label={`删除会话 ${record.title}`} onClick={() => remove(record.id, record.title)}>删除</button>
-                </article>
-              ))}
+              {records.map(record => {
+                const runs = Object.values(generationRuns).filter(run => run.sessionId === record.id);
+                const answers = runs.filter(run => run.kind === 'answer').length;
+                const interactive = runs.filter(run => run.kind === 'interactive').length;
+                const status = [
+                  answers ? `回答中${answers > 1 ? `（${answers}）` : ''}` : '',
+                  interactive ? `交互生成中${interactive > 1 ? `（${interactive}）` : ''}` : '',
+                ].filter(Boolean).join(' · ');
+                return (
+                  <article className={`history-card${status ? ' is-running' : ''}`} key={record.id}>
+                    <button type="button" className="session-open" onClick={() => open(record.id)}>
+                      <strong>{record.title}</strong>
+                      {status && <span className="session-running"><span className="session-running-dot" aria-hidden="true" />{status}</span>}
+                      {record.preview && <span className="session-preview">{record.preview}</span>}
+                      <span className="session-meta">{formatUpdatedAt(record.updatedAt)} · {record.nodeCount} 个节点</span>
+                    </button>
+                    <button type="button" className="session-delete" aria-label={`删除会话 ${record.title}`} onClick={() => remove(record.id, record.title)}>删除</button>
+                  </article>
+                );
+              })}
             </div>
           ) : (
             <div className="history-empty">

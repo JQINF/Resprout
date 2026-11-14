@@ -1,0 +1,151 @@
+:root {
+  --rs-bg: #f2f6f0;
+  --rs-surface: #ffffff;
+  --rs-text: #293a30;
+  --rs-muted: #687a6d;
+  --rs-accent: #527a5e;
+  --rs-accent-strong: #376c49;
+  --rs-border: #d5e1d4;
+  --rs-soft: #edf5ee;
+  --rs-warm: #eee0c4;
+  color: var(--rs-text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--rs-bg);
+}
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; }
+body {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  background:
+    radial-gradient(70% 60% at 0% 0%, rgba(210, 229, 207, 0.5), transparent 72%),
+    radial-gradient(55% 50% at 100% 100%, rgba(238, 224, 196, 0.32), transparent 76%),
+    var(--rs-bg);
+  color: var(--rs-text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+img, svg, canvas, video { max-width: 100%; }
+::selection { color: var(--rs-text); background: #d8e8d7; }
+.rs-page { display: grid; flex: 1; gap: 12px; width: 100%; max-width: none; min-height: 0; margin: 0; }
+.rs-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 20px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.97), rgba(251, 253, 249, 0.93));
+  box-shadow: 0 18px 42px -22px rgba(41, 67, 47, 0.22), 0 3px 10px rgba(41, 67, 47, 0.05), inset 0 1px 0 #fff;
+}
+.rs-title { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--rs-text); font-size: 22px; line-height: 1.3; font-weight: 700; letter-spacing: -0.02em; }
+.rs-title::before { content: ''; flex: 0 0 5px; height: 22px; border-radius: 999px; background: linear-gradient(#79a77d, #47775a); box-shadow: 0 2px 5px rgba(55, 108, 73, 0.18); }
+.rs-subtitle { margin: 4px 0 0 15px; color: var(--rs-accent); font-size: 12px; font-weight: 650; }
+.rs-description { margin: 10px 0 0; color: var(--rs-muted); }
+.rs-note { padding: 10px 12px; border: 1px solid #eadfc9; border-radius: 12px; background: linear-gradient(135deg, #fbf7ed, #f8f3e8); color: #6f6758; box-shadow: inset 0 1px 0 #fff; }
+.rs-badge { display: inline-flex; align-items: center; width: max-content; padding: 3px 9px; border: 1px solid #d8e6d6; border-radius: 999px; background: linear-gradient(135deg, #f2f8ef, #e6f1e5); color: var(--rs-accent-strong); box-shadow: inset 0 1px 0 #fff; font-size: 11px; font-weight: 650; }
+.rs-grid { display: grid; gap: 12px; min-width: 0; min-height: 0; }
+.rs-grid-two { flex: 1; grid-template-columns: minmax(0, 1.4fr) minmax(180px, 0.8fr); align-items: stretch; min-height: 0; }
+.rs-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #d8e3d6;
+  border-radius: 15px;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(82, 122, 94, 0.13) 1px, transparent 1.2px),
+    linear-gradient(150deg, #fbfdf9, #f4f8f2);
+  background-size: 20px 20px, 100% 100%;
+  box-shadow: inset 0 1px 4px rgba(41, 67, 47, 0.05), 0 1px 0 #fff;
+}
+.rs-chart { position: relative; z-index: 1; display: block; width: 100%; height: clamp(160px, 38vh, 260px); min-height: 0; }
+.rs-stage > .rs-chart:only-child { height: 100%; }
+.rs-controls { display: grid; gap: 10px; min-width: 0; min-height: 0; overflow: auto; align-content: start; padding: 12px; border: 1px solid #dde7db; border-radius: 14px; background: rgba(247, 250, 245, 0.82); box-shadow: inset 0 1px 0 #fff; scrollbar-width: thin; }
+.rs-control-list { display: grid; }
+.rs-guide { padding: 10px 12px; border: 1px solid #dce7da; border-radius: 11px; background: rgba(237, 245, 238, 0.72); color: var(--rs-text); font-size: 12px; line-height: 1.6; }
+.rs-guide summary { color: var(--rs-accent-strong); cursor: pointer; font-weight: 700; }
+.rs-guide-goal { display: block; margin-top: 8px; font-size: 13px; }
+.rs-guide ol { margin: 8px 0; padding-left: 19px; }
+.rs-guide li + li { margin-top: 4px; }
+.rs-guide-question { margin: 0; padding: 7px 9px; border-radius: 8px; background: #f7f2e7; color: #716650; }
+.rs-guide-question span { margin-right: 6px; color: #9a784d; font-size: 11px; font-weight: 700; }
+.rs-result-label { display: block; margin: 0 0 5px 2px; color: var(--rs-muted); font-size: 11px; font-weight: 650; }
+.rs-reset { width: 100%; padding: 7px 12px; font-size: 12px; }
+.rs-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.rs-control-row { display: grid; grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(38px, auto); align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid rgba(213, 225, 212, 0.75); }
+.rs-control-row:last-child { border-bottom: 0; }
+.rs-control-row .rs-field { display: block; font-size: 11px; }
+.rs-control-row[data-control="a11"] .rs-field, .rs-control-row[data-control="a21"] .rs-field, .rs-control-row[data-control="x1"] .rs-field { color: #527a5e; }
+.rs-control-row[data-control="a12"] .rs-field, .rs-control-row[data-control="a22"] .rs-field, .rs-control-row[data-control="x2"] .rs-field { color: #a57845; }
+.rs-control-row .rs-output, .rs-control-row .rs-value { padding: 0; border: 0; background: transparent; box-shadow: none; font-size: 12px; text-align: right; }
+.rs-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.rs-value { color: var(--rs-accent-strong); font-weight: 700; font-variant-numeric: tabular-nums; }
+.rs-field { display: grid; gap: 6px; min-width: 0; color: var(--rs-text); font-size: 12px; font-weight: 600; }
+.rs-range { width: 100%; height: 18px; margin: 0; appearance: none; background: transparent; cursor: pointer; }
+.rs-range::-webkit-slider-runnable-track { height: 4px; border-radius: 999px; background: #d5e1d3; box-shadow: inset 0 1px 2px rgba(41, 67, 47, 0.08); }
+.rs-range::-webkit-slider-thumb { width: 16px; height: 16px; margin-top: -6px; appearance: none; border: 2px solid #fff; border-radius: 50%; background: var(--rs-accent); box-shadow: 0 2px 5px rgba(41, 67, 47, 0.2); }
+.rs-range::-moz-range-track { height: 4px; border-radius: 999px; background: #d5e1d3; }
+.rs-range::-moz-range-thumb { width: 12px; height: 12px; border: 2px solid #fff; border-radius: 50%; background: var(--rs-accent); box-shadow: 0 2px 5px rgba(41, 67, 47, 0.2); }
+.rs-btn, .rs-btn-secondary { padding: 9px 14px; border-radius: 10px; cursor: pointer; font-weight: 600; transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease; }
+.rs-btn { border: 1px solid #4c7e58; background: linear-gradient(145deg, #6b9872, #477a56); color: #fff; box-shadow: 0 4px 10px rgba(55, 108, 73, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
+.rs-btn:hover { background: linear-gradient(145deg, #76a47d, #4c805a); box-shadow: 0 6px 14px rgba(55, 108, 73, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.3); transform: translateY(-1px); }
+.rs-btn-secondary { border: 1px solid #d4e0d2; background: #fff; color: var(--rs-accent-strong); box-shadow: 0 2px 5px rgba(41, 67, 47, 0.04), inset 0 1px 0 #fff; }
+.rs-btn-secondary:hover { border-color: #9db9a1; background: var(--rs-soft); }
+.rs-btn:active, .rs-btn-secondary:active { transform: translateY(1px) scale(0.98); box-shadow: inset 0 2px 4px rgba(41, 67, 47, 0.12); }
+.rs-btn:focus-visible, .rs-btn-secondary:focus-visible, .rs-range:focus-visible, .rs-select:focus-visible, .rs-input:focus-visible { outline: 2px solid var(--rs-accent); outline-offset: 2px; }
+.rs-output { display: block; padding: 8px 11px; border: 1px solid #d8e5d7; border-radius: 10px; background: #fff; color: var(--rs-accent-strong); box-shadow: inset 0 1px 3px rgba(41, 67, 47, 0.04), 0 1px 0 #fff; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rs-select, .rs-input, .rs-controls select { width: 100%; padding: 8px 10px; border: 1px solid #d4e0d2; border-radius: 9px; outline: none; color: var(--rs-text); background: #fff; box-shadow: inset 0 1px 2px rgba(41, 67, 47, 0.04); }
+@media (max-width: 480px) {
+  .rs-panel { padding: 14px; }
+  .rs-grid-two { grid-template-columns: minmax(0, 1fr); }
+  .rs-title { font-size: 20px; }
+  .rs-controls { padding: 0; border: 0; background: transparent; box-shadow: none; }
+  .rs-control-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* === 宿主布局层 v2（opt-in：.rs-page.rs-layout-v2） =========================
+ * 只在生成页面显式标记时生效，历史页面沿用上面的兼容样式。
+ * 层级约定：宿主基础层（上）→ 宿主布局层（本段）→ 候选局部内容层（模型自定义类）。
+ * 3:2 指 iframe 内容视口；页面主体填满可用区域，图形填充布局分配的高度。 */
+
+.rs-page.rs-layout-v2 { grid-template-rows: minmax(0, 1fr); height: 100%; }
+.rs-page.rs-layout-v2 > .rs-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  padding: clamp(12px, 2vw, 24px);
+}
+.rs-page.rs-layout-v2 .rs-head { min-width: 0; min-height: 0; }
+.rs-page.rs-layout-v2 .rs-head .rs-title { flex-wrap: wrap; }
+.rs-page.rs-layout-v2 .rs-body { display: grid; grid-template-rows: minmax(0, 1fr); gap: 12px; min-width: 0; min-height: 0; }
+/* 骨架一：图形 + 侧栏（约 65%/35%） */
+.rs-page.rs-layout-v2.rs-layout-split .rs-body { grid-template-columns: minmax(0, 1.85fr) minmax(0, 1fr); }
+/* 骨架二：主图 + 底栏 */
+.rs-page.rs-layout-v2.rs-layout-stack .rs-body { grid-template-rows: minmax(0, 1fr) auto; }
+.rs-page.rs-layout-v2 .rs-body > .rs-stage { display: grid; min-width: 0; min-height: 0; }
+/* 图形填充被布局分配的区域；不再有 vh 猜测或 260px 固定上限 */
+.rs-page.rs-layout-v2 .rs-stage > canvas.rs-chart,
+.rs-page.rs-layout-v2 .rs-stage > svg.rs-chart { width: 100%; height: 100%; max-height: none; }
+.rs-page.rs-layout-v2 .rs-stage > .rs-chart:only-child { height: 100%; }
+.rs-page.rs-layout-v2 .rs-controls {
+  align-content: start;
+  overflow: auto;
+  min-width: 0;
+  min-height: 0;
+}
+.rs-page.rs-layout-v2.rs-layout-stack .rs-controls { max-height: 38vh; }
+/* 长公式使用专用横向滚动区域，不撑宽侧栏 */
+.rs-page.rs-layout-v2 .rs-formula-scroll { max-width: 100%; overflow-x: auto; white-space: nowrap; }
+/* 断点：iframe 视口宽度小于 640px 时侧栏骨架切换为紧凑底栏；
+ * 控制区高度用 vh 上限（在固定 3:2 视口内是确定值），auto 行中百分比对不确定行高不生效。 */
+@media (max-width: 640px) {
+  .rs-page.rs-layout-v2.rs-layout-split .rs-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .rs-page.rs-layout-v2 .rs-controls { max-height: 38vh; }
+}
