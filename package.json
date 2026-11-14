@@ -1,6 +1,6 @@
 {
   "name": "resprout",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "A canvas for divergent learning. Branch from curiosity and build your own map of understanding.",
   "type": "module",
   "license": "MIT",
