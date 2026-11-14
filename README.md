@@ -59,22 +59,6 @@ resprout
 
 需要联网获取信息时，打开“联网搜索”。该功能由 DeepSeek 提供，可复用已配置的 DeepSeek API Key。
 
-## 开发与测试
-
-```bash
-npm run typecheck     # TypeScript 类型检查
-npm run build         # 生产构建
-npm run test:unit     # 纯逻辑单元测试
-npm run test:browser  # 真实浏览器固定 fixture + store 集成测试
-npm test              # 全部离线测试（不依赖模型/API 密钥）
-```
-
-`test:browser` 需要本机安装 Chromium 内核浏览器，默认优先使用 Microsoft Edge；可用
-`RESPROUT_BROWSER=/path/to/chrome` 指定。固定样本结果记录在
-`tests/browser/baseline.json`，`npm run test:baseline` 只比较状态与问题码。
-生成的诊断包可用 `node tests/browser/run.ts --replay=/path/to/diagnostic.json` 重放验收。
-交互流水线的修复设计与验证说明见
-[`docs/interactive-pipeline-repair-report.md`](docs/interactive-pipeline-repair-report.md)。
 
 ## 致谢
 
