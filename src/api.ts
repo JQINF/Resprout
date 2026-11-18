@@ -132,6 +132,7 @@ export interface ChatResult {
 export interface ChatTextDeltaEvent {
   type: 'text_delta';
   delta: string;
+  replace?: boolean;
 }
 
 export interface ChatThinkingDeltaEvent {
@@ -143,6 +144,7 @@ export interface ChatToolCallEvent {
   type: 'tool_call';
   name: string;
   arguments: unknown;
+  agentTrace?: unknown;
 }
 
 export interface ChatDoneEvent {
@@ -155,6 +157,7 @@ export interface ChatDoneEvent {
 export interface ChatErrorEvent {
   type: 'error';
   error: string;
+  agentTrace?: unknown;
 }
 
 export type ChatStreamEvent =
@@ -259,6 +262,7 @@ function streamEvent(value: unknown): ChatStreamEvent | null {
 
   switch (value.type) {
     case 'text_delta':
+      return typeof value.delta === 'string' ? { type: value.type, delta: value.delta, ...(value.replace === true ? { replace: true } : {}) } : null;
     case 'thinking_delta':
       return typeof value.delta === 'string' ? { type: value.type, delta: value.delta } : null;
     case 'tool_call':
@@ -266,6 +270,7 @@ function streamEvent(value: unknown): ChatStreamEvent | null {
         type: 'tool_call',
         name: typeof value.name === 'string' ? value.name : '',
         arguments: value.arguments,
+        ...(value.agentTrace !== undefined ? { agentTrace: value.agentTrace } : {}),
       };
     case 'done': {
       const result = isRecord(value.result) && typeof value.result.text === 'string'
@@ -283,7 +288,7 @@ function streamEvent(value: unknown): ChatStreamEvent | null {
       };
     }
     case 'error':
-      return typeof value.error === 'string' ? { type: 'error', error: value.error } : null;
+      return typeof value.error === 'string' ? { type: 'error', error: value.error, ...(value.agentTrace !== undefined ? { agentTrace: value.agentTrace } : {}) } : null;
     default:
       return null;
   }
@@ -367,7 +372,7 @@ export async function streamChat(
         const parsed: unknown = JSON.parse(data);
         const event = streamEvent(parsed);
         if (event) {
-          if (event.type === 'error') throw new Error(event.error);
+          if (event.type === 'error') throw Object.assign(new Error(event.error), { agentTrace: event.agentTrace });
           onEvent(event);
         }
       }

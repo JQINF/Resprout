@@ -10,6 +10,7 @@ import type { Paragraph, Root, Text as MdastText } from 'mdast';
 import type { InlineMath, Math as MathNode } from 'mdast-util-math';
 import type { Node as UnistNode } from 'unist';
 import type { Plugin } from 'unified';
+import { looksLikeCode, normalizeMarkdown, normalizeMathSource, unicodeMathPattern } from './markdown-normalize.ts';
 import 'highlight.js/styles/github.css';
 import 'katex/dist/katex.min.css';
 
@@ -114,61 +115,6 @@ function FittedMathSpan({ node, ...props }: ComponentPropsWithoutRef<'span'> & E
 }
 
 const fittedComponents: Components = { ...components, span: FittedMathSpan };
-
-const unicodeMathPattern = /(?<![A-Za-z0-9_])(?:[A-Za-z]+\([^()\n]*(?:\p{Script=Greek}|[_^])[^()\n]*\)|[A-Za-z\p{Script=Greek}](?:[_^](?:\{[^{}\n]+\}|[A-Za-z0-9\p{Script=Greek}]+))+(?:\([^()\n]*\))?|[\p{Script=Greek}ℝℕℤℚℂ∑∏∫√∞±≤≥≠≈∈∂∇→])(?![A-Za-z0-9_])/gu;
-
-function looksLikeMath(value: string): boolean {
-  const text = value.trim();
-  return /\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|oint|lim|log|ln|exp|sin|cos|tan|mean|mathbb|mathcal|mathbf|mathrm|operatorname|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|sigma|phi|omega|ldots|cdots|cdot|times|leq|geq|neq|in|subset|infty|partial|nabla)\b/.test(text)
-    || /[_^]\{[^{}\n]+\}/.test(text)
-    || /(?:\b[A-Za-z][_^][A-Za-z0-9]+\b.*){2}/s.test(text) && /[=+\-*/∑∏√]/.test(text)
-    || /^[A-Za-z][_^][A-Za-z0-9]+$/.test(text)
-    || /^(?:[A-Za-z]|log|ln|exp|sin|cos|tan|min|max|mean|std|clip)\([^()\n]*\)$/.test(text)
-    || /\b[A-Za-z][_^][A-Za-z0-9]+\b/.test(text) && /[=+\-*/|≈<>≤≥]/.test(text)
-    || /[\p{Script=Greek}ℝℕℤℚℂ∑∏∫√∞±≤≥≠≈∈∂∇→]/u.test(text);
-}
-
-function looksLikeCode(value: string): boolean {
-  return /\b(?:const|let|var|function|return|class|import|export|def|print|public|private|static|if|else|for|while|switch|throw|try|catch|new)\b/.test(value)
-    || /;[ \t]*(?:\n|$)/.test(value);
-}
-
-function normalizeMathSyntax(content: string): string {
-  return content.replace(
-    /(^|\n)([ \t]*)(`{3,}|~{3,})[ \t]*([^\n`]*)\n([\s\S]*?)\n\2\3[ \t]*(?=\n|$)|(`+)([^`\n]+?)\6(?!`)|\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]/g,
-    (
-      match: string,
-      leading: string,
-      _indent: string,
-      fence: string | undefined,
-      info: string | undefined,
-      code: string | undefined,
-      inlineFence: string | undefined,
-      inlineCode: string | undefined,
-      inlineMath: string | undefined,
-      displayMath: string | undefined,
-    ): string => {
-      if (inlineFence) {
-        if (inlineCode === undefined) return match;
-        return looksLikeMath(inlineCode) && !looksLikeCode(inlineCode) ? `$${inlineCode.trim()}$` : match;
-      }
-      if (inlineMath !== undefined) return `$${inlineMath.trim()}$`;
-      if (displayMath !== undefined) return `$$\n${displayMath.trim()}\n$$`;
-      if (fence === undefined || code === undefined) return match;
-      const language = (info ?? '').trim().split(/\s+/, 1)[0]?.toLowerCase() ?? '';
-      if (['math', 'latex', 'tex'].includes(language) || (!language && looksLikeMath(code) && !looksLikeCode(code))) {
-        return `${leading}$$\n${code.trim()}\n$$`;
-      }
-      return match;
-    },
-  );
-}
-
-function normalizeMathSource(value: string): string {
-  return value.trim()
-    .replace(/([_^])([A-Za-z0-9]+)/g, '$1{$2}')
-    .replace(/~/g, '\\sim ');
-}
 
 function normalizeMathNode(node: MathNode | InlineMath): void {
   node.value = normalizeMathSource(node.value);
@@ -276,14 +222,6 @@ const remarkUnicodeMath: Plugin<[], Root> = () => (tree: Root): void => {
   }
   visit(tree);
 };
-
-function normalizeMarkdown(content: string): string {
-  const normalized = content.replace(
-    /(^|[\s([{（【])\$(\d+(?:\.\d+)?)(\s+(?:and|or|和|与|或|到|至)\s+|\s*(?:,|，|-|–|—)\s*)\$(?=\d)/gi,
-    (_match: string, leading: string, amount: string, separator: string): string => `${leading}\\$${amount}${separator}\\$`,
-  );
-  return normalizeMathSyntax(normalized).replace(/(\*\*|__)([^\n]*?\S)\1(?=[\p{L}\p{N}])/gu, '$1$2$1 ');
-}
 
 function MarkdownContent({ content, fitMath = false }: MarkdownContentProps) {
   return (

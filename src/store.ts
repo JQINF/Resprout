@@ -59,10 +59,10 @@ import type {
   SessionSnapshot,
   Usage,
 } from './session.ts';
+import { findFreePosition } from './node-placement.ts';
 import { deletePdfFile, savePdfFile } from './pdf-store.ts';
 import { saveSessionSnapshot } from './session-library.ts';
 
-const NODE_GAP = 40;
 const interactiveDiagnostics = new DiagnosticBundleStore(24);
 const generationControllers = new Map<string, { controller: AbortController; runId: string }>();
 
@@ -128,15 +128,24 @@ export interface ResproutStore {
   webSearchEnabled: boolean;
   quickActions: QuickAction[];
   generationRuns: Record<string, GenerationRun>;
+  pinnedNodeId: string | null;
+  pinnedPanelWidth: number | null;
+  /** 固定前全部节点的画布几何与视口，取消固定时整体还原。 */
+  pinnedRestore: { nodes: { id: string; x: number; y: number; width: number; height: number }[]; viewport: { x: number; y: number; zoom: number } } | null;
+  /** 停靠几何每次应用时递增，驱动固定面板重测高亮锚点。 */
+  pinnedDockTick: number;
 
   setQuickActions(value: QuickAction[] | ((actions: QuickAction[]) => QuickAction[])): void;
+  pinNode(id: string): void;
+  unpinNode(): void;
+  setPinnedPanelWidth(width: number): void;
   loadProviders(): Promise<void>;
   saveSearchConfig(input: SaveSearchConfigInput): Promise<void>;
   setWebSearchEnabled(value: boolean): void;
   saveProvider(input: SaveProviderInput): Promise<void>;
   deleteProvider(id: string): Promise<void>;
   activateProvider(input: ModelSelection): Promise<void>;
-  addNode(center: XYPosition, sourceId?: string | null, placement?: 'point' | 'stack', sourceHandle?: string | null): void;
+  addNode(center: XYPosition, sourceId?: string | null, sourceHandle?: string | null): void;
   addPdf(file: File, center: XYPosition): Promise<string>;
   addImage(file: File, center: XYPosition): Promise<string>;
   updateNodeContent(id: string, content: string): void;
@@ -157,18 +166,6 @@ export interface ResproutStore {
   loadSession(value: SessionSnapshot): void;
 }
 
-interface NodeBounds {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-interface ElementSize {
-  w: number;
-  h: number;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -183,7 +180,7 @@ function errorMessage(error: unknown): string {
 function interactiveErrorStage(error: unknown): InteractiveStage {
   if (isRecord(error)) {
     const stage = error.stage;
-    if (stage === 'generation' || stage === 'check' || stage === 'repair' || stage === 'provider'
+    if (stage === 'generation' || stage === 'experiment' || stage === 'check' || stage === 'provider'
       || stage === 'protocol' || stage === 'done' || stage === 'cancelled') return stage;
   }
   return 'provider';
@@ -197,51 +194,6 @@ function loadWebSearchEnabled(): boolean {
   try { return localStorage.getItem('resprout.web-search') === '1'; } catch {
     return false;
   }
-}
-
-function nodeBounds(node: ConversationNode): NodeBounds {
-  return {
-    x: node.position.x,
-    y: node.position.y,
-    w: node.measured?.width ?? numericStyleDimension(node.style?.width, node.data.role === 'interactive' ? DEFAULT_INTERACTIVE_SIZE.width : node.data.role === 'assistant' ? DEFAULT_ANSWER_SIZE.width : 280),
-    h: node.measured?.height ?? numericStyleDimension(node.style?.height, node.data.role === 'interactive' ? DEFAULT_INTERACTIVE_SIZE.height : node.data.role === 'assistant' ? DEFAULT_ANSWER_SIZE.height : 120),
-  };
-}
-
-function overlaps(a: NodeBounds, b: NodeBounds): boolean {
-  return a.x < b.x + b.w + NODE_GAP
-    && a.x + a.w + NODE_GAP > b.x
-    && a.y < b.y + b.h + NODE_GAP
-    && a.y + a.h + NODE_GAP > b.y;
-}
-
-function findFreePosition(position: XYPosition, size: ElementSize, nodes: ConversationNode[]): XYPosition {
-  const others = nodes.map(nodeBounds);
-  const fits = (x: number, y: number): boolean => !others.some(bounds => overlaps({ x, y, w: size.w, h: size.h }, bounds));
-  if (fits(position.x, position.y)) return { x: Math.round(position.x), y: Math.round(position.y) };
-
-  const stepX = Math.round(size.w + NODE_GAP);
-  const stepY = Math.round(size.h + NODE_GAP);
-  for (let column = 0; column <= 12; column += 1) {
-    for (let row = 0; row <= 24; row += 1) {
-      const x = position.x + column * stepX;
-      const y = position.y + row * stepY;
-      if (fits(x, y)) return { x: Math.round(x), y: Math.round(y) };
-    }
-  }
-  return { x: Math.round(position.x), y: Math.round(position.y) };
-}
-
-function findStackPosition(size: ElementSize, nodes: ConversationNode[], center: XYPosition): XYPosition {
-  if (!nodes.length) {
-    return { x: Math.round(center.x - size.w / 2), y: Math.round(center.y - size.h / 2) };
-  }
-  const left = Math.min(...nodes.map(node => node.position.x));
-  const bottom = Math.max(...nodes.map(node => {
-    const bounds = nodeBounds(node);
-    return bounds.y + bounds.h;
-  }));
-  return findFreePosition({ x: left, y: bottom + 80 }, size, nodes);
 }
 
 function reachesTarget(edges: ConversationEdge[], start: string, target: string): boolean {
@@ -371,11 +323,31 @@ export const useStore = create<ResproutStore>()((set, get) => ({
   webSearchEnabled: loadWebSearchEnabled(),
   quickActions: loadQuickActions(),
   generationRuns: {},
+  pinnedNodeId: null,
+  pinnedPanelWidth: null,
+  pinnedRestore: null,
+  pinnedDockTick: 0,
 
   setQuickActions(value) {
     set(state => ({
       quickActions: typeof value === 'function' ? value(state.quickActions) : value,
     }));
+  },
+
+  pinNode(id) {
+    set(state => ({
+      pinnedNodeId: id,
+      pinnedPanelWidth: state.pinnedPanelWidth ?? Math.max(240, Math.round(window.innerWidth / 4)),
+    }));
+  },
+
+  unpinNode() {
+    set({ pinnedNodeId: null });
+  },
+
+  setPinnedPanelWidth(width) {
+    const maxWidth = Math.max(320, Math.round(window.innerWidth * 0.6));
+    set({ pinnedPanelWidth: Math.min(maxWidth, Math.max(240, Math.round(width))) });
   },
 
   async loadProviders() {
@@ -411,15 +383,13 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     set({ providers: value.providers, activeProvider: value.active });
   },
 
-  addNode(center, sourceId = null, placement = 'point', sourceHandle = null) {
+  addNode(center, sourceId = null, sourceHandle = null) {
     if (sourceId && !canCreateFollowupFrom(get().nodes.find(node => node.id === sourceId))) return;
     const id = crypto.randomUUID();
     set(state => {
       const nodeType: NodeType = sourceId ? 'question' : state.nodes.length === 0 ? 'root' : 'chat';
       const source = sourceId ? state.nodes.find(node => node.id === sourceId) ?? null : null;
-      const position = placement === 'stack'
-        ? findStackPosition({ w: 280, h: 120 }, state.nodes, center)
-        : center;
+      const position = findFreePosition({ x: center.x - 140, y: center.y - 60 }, { w: 280, h: 120 }, state.nodes);
       const data: ConversationNodeData = {
         nodeType,
         role: 'user',
@@ -451,13 +421,11 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         set(state => {
           const siblings = state.nodes.filter(item => item.id !== id);
           const size = { w: useWidth, h: useHeight };
-          const position = placement === 'stack'
-            ? findStackPosition(size, siblings, center)
-            : findFreePosition(
-                { x: center.x - useWidth / 2, y: center.y - useHeight / 2 },
-                size,
-                siblings,
-              );
+          const position = findFreePosition(
+            { x: center.x - useWidth / 2, y: center.y - useHeight / 2 },
+            size,
+            siblings,
+          );
           return {
             nodes: state.nodes.map((item): ConversationNode => item.id === id ? { ...item, position } : item),
           };
@@ -466,7 +434,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       }
       requestAnimationFrame(() => adjust(attempt + 1));
     };
-    if (placement === 'stack') requestAnimationFrame(() => adjust(0));
+    requestAnimationFrame(() => adjust(0));
   },
 
   async addPdf(file, center) {
@@ -729,6 +697,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       explanation: existing.data.explanation,
       reviewStatus: existing.data.reviewStatus,
       technicalStatus: existing.data.technicalStatus,
+      verificationSummary: existing.data.verificationSummary,
     } : null;
 
     if (existing) {
@@ -919,6 +888,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         fallback: false,
         error: '',
         reviewStatus: completed.reviewStatus,
+        verificationSummary: completed.verificationSummary,
         technicalStatus: completed.technicalStatus,
         recoveryStatus: undefined,
         issueCodes: [],
@@ -1073,7 +1043,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       .trim();
     set(state => {
       const data: ConversationNodeData = { nodeType: 'chat', role: 'assistant', content: '', model: selectedModel, pending: true, error: '', createdAt: Date.now() };
-      const nodes: ConversationNode[] = state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, pending: true } } : node).concat({
+      const nodes: ConversationNode[] = state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, pending: true, error: '' } } : node).concat({
         id: answerId,
         type: 'conversation',
         position: { x: source.position.x + sourceWidth + 56, y: source.position.y + answerOffset },
@@ -1094,20 +1064,23 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     const streamState: { result: ChatResult | null; usage: Usage | null } = { result: null, usage: null };
     let pendingText = '';
     let pendingThinking = '';
+    let replaceText = false;
     let streamFrame: number | null = null;
     const flushDeltas = (): void => {
       if (streamFrame !== null) cancelAnimationFrame(streamFrame);
       streamFrame = null;
       const text = pendingText;
       const thinking = pendingThinking;
+      const replace = replaceText;
       pendingText = '';
       pendingThinking = '';
-      if (!text && !thinking) return;
+      replaceText = false;
+      if (!text && !thinking && !replace) return;
       updateGenerationSession(sessionId, state => ({
         ...state,
-        nodes: text
+        nodes: text || replace
           ? state.nodes.map((node): ConversationNode => node.id === answerId
-            ? { ...node, data: { ...node.data, content: node.data.content + text } }
+            ? { ...node, data: { ...node.data, content: replace ? text : node.data.content + text } }
             : node)
           : state.nodes,
         edges: thinking
@@ -1128,10 +1101,19 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       const messages: ChatMessage[] = await prepareImageMessages(context, modelInputs);
       await streamChat(messages, (event: ChatStreamEvent) => {
         if (event.type === 'text_delta') {
-          pendingText += event.delta;
+          if (event.replace) {
+            pendingText = event.delta;
+            replaceText = true;
+          } else {
+            pendingText += event.delta;
+          }
           scheduleFlush();
         } else if (event.type === 'thinking_delta') {
           pendingThinking += event.delta;
+          scheduleFlush();
+        } else if (event.type === 'tool_call') {
+          pendingText = '';
+          replaceText = true;
           scheduleFlush();
         } else if (event.type === 'done') {
           streamState.result = event.result ?? null;
@@ -1283,7 +1265,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
   loadSession(value) {
     discardedSessions.delete(value.session.id);
     sessionCache.set(value.session.id, value);
-    set({ session: value.session, nodes: pruneOrphanHighlights(value.nodes, value.edges), edges: value.edges });
+    set({ session: value.session, nodes: pruneOrphanHighlights(value.nodes, value.edges), edges: value.edges, pinnedNodeId: null, pinnedRestore: null });
     void get().reconcileSession();
   },
 }));

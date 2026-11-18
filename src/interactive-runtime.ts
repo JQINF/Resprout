@@ -16,15 +16,13 @@ import designCss from './interactive-design.css?raw';
 import { extractInteractiveContract, MAX_CONTRACT_CASES } from './interactive-contract.ts';
 import type { InteractiveContract, InteractiveContractCase } from './interactive-contract.ts';
 import { hashText, hasInteractiveHtmlShape } from './interactive-html.ts';
-import { normalizeInteractiveMath } from './interactive-math.ts';
+import { buildDocument } from './interactive-document.ts';
 import {
   createInteractiveIdentity,
   createInteractiveRuntimeConfig,
   INTERACTIVE_MESSAGE_TYPES,
   INTERACTIVE_RUNTIME_VERSION,
-  INTERACTIVE_TEST_CONFIG_ELEMENT_ID,
   parseInteractiveMessage,
-  serializeInteractiveProtocol,
   ValidationMessageGate,
 } from './interactive-protocol.ts';
 import type {
@@ -53,12 +51,6 @@ import type {
   TechnicalStatus,
 } from './interactive-validation.ts';
 
-const PROTOCOL_SOURCE_PLACEHOLDER = '__RESPROUT_PROTOCOL__';
-const RUNTIME_SOURCE = runtimeSource.replace(PROTOCOL_SOURCE_PLACEHOLDER, () => serializeInteractiveProtocol());
-const RUNTIME_SCRIPT = `<script id="resprout-runtime">${RUNTIME_SOURCE}</script>`;
-const DESIGN_STYLES = `<style>${designCss}</style>`;
-const METADATA = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">`;
-
 const DEFAULT_LIMITS: InteractiveRuntimeLimits = {
   readyTimeoutMs: 2000,
   actionTimeoutMs: 2500,
@@ -78,26 +70,8 @@ export interface BuildInteractiveDocumentOptions {
   testConfig?: InteractiveRuntimeConfig | null;
 }
 
-function testConfigMarkup(config: InteractiveRuntimeConfig | null | undefined): string {
-  if (!config) return '';
-  const json = JSON.stringify(config).replace(/</g, '\\u003c');
-  return `<script id="${INTERACTIVE_TEST_CONFIG_ELEMENT_ID}" type="application/json">${json}</script>`;
-}
-
 export function buildInteractiveDocument(content: string, options: BuildInteractiveDocumentOptions = {}): string {
-  const html = normalizeInteractiveMath(String(content ?? ''));
-  const metadata = `${METADATA}${testConfigMarkup(options.testConfig)}${RUNTIME_SCRIPT}`;
-  if (/<html[\s>]/i.test(html)) {
-    // 注意：`<header ...>`（生成页面常用的 rs-head 区域）不能被误判为 <head>，
-    // 否则宿主样式注入会丢失——只允许 <head> 或 <head ...> 两种真实头部写法。
-    if (/<head(?:\s[^>]*)?>/i.test(html)) {
-      const withRuntime = html.replace(/<head(?:\s[^>]*)?>/i, match => `${match}${metadata}`);
-      if (/<\/head>/i.test(withRuntime)) return withRuntime.replace(/<\/head>/i, `${DESIGN_STYLES}</head>`);
-      return withRuntime;
-    }
-    return html.replace(/<html[^>]*>/i, match => `${match}<head>${metadata}${DESIGN_STYLES}</head>`);
-  }
-  return `<!doctype html><html><head>${metadata}${DESIGN_STYLES}</head><body>${html}</body></html>`;
+  return buildDocument(content, runtimeSource, designCss, options.testConfig);
 }
 
 type FrameSettle = {

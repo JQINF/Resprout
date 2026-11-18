@@ -1,3 +1,4 @@
+import { runInteractiveAgent } from './interactive-agent.ts';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
@@ -348,6 +349,24 @@ async function handleChat(request: IncomingMessage, response: ServerResponse): P
     response.end();
     return;
   }
+  if (options.purpose === 'interactive') {
+    try {
+      const text = await runInteractiveAgent({
+        provider: selected.provider, modelId, signal: controller.signal,
+        vision: modelInputs.includes('image'),
+        prompt: messages.map(message => `${message.role}: ${typeof message.content === 'string' ? message.content : (message.content as MessageBlock[]).filter((block): block is TextContent => block.type === 'text').map(block => block.text).join('\n')}`).join('\n\n'),
+        images: messages.flatMap(message => typeof message.content === 'string' ? [] : (message.content as MessageBlock[]).filter((block): block is ImageContent => block.type === 'image')),
+        onEvent: event => writeEvent(response, event),
+      });
+      writeEvent(response, { type: 'text_delta', delta: text });
+      writeEvent(response, { type: 'done', stopReason: 'stop', usage: null });
+    } catch (error) {
+      const agentTrace = isRecord(error) ? error.agentTrace : undefined;
+      writeEvent(response, { type: 'error', error: errorMessage(error), ...(agentTrace !== undefined ? { agentTrace } : {}) });
+    }
+    response.end();
+    return;
+  }
   const maxTokens = options.purpose === 'route' ? 512 : interactive ? 32768 : 4096;
   try {
     const result = await streamAnswer({
@@ -359,7 +378,12 @@ async function handleChat(request: IncomingMessage, response: ServerResponse): P
       options,
       onEvent: event => writeEvent(response, event),
     });
-    writeEvent(response, { type: 'done', stopReason: result.stopReason, usage: result.usage });
+    writeEvent(response, {
+      type: 'done',
+      stopReason: result.stopReason,
+      result: { text: result.text, thinking: result.thinking },
+      usage: result.usage,
+    });
   } catch (error) {
     writeEvent(response, { type: 'error', error: errorMessage(error) });
   }

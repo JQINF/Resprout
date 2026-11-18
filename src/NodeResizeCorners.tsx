@@ -103,7 +103,7 @@ export default function NodeResizeCorners({ id, minWidth, minHeight, aspectRatio
     };
 
     onResizeStart?.();
-    element.setPointerCapture(event.pointerId);
+    try { element.setPointerCapture(event.pointerId); } catch { /* 合成/自动化事件没有活动指针，监听仍直接挂在元素上 */ }
     element.addEventListener('pointermove', move);
     element.addEventListener('pointerup', finish);
     element.addEventListener('pointercancel', finish);

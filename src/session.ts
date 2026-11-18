@@ -1,5 +1,7 @@
 import type { Edge, Node } from '@xyflow/react';
 import type { TechnicalStatus } from './interactive-validation.ts';
+import { sanitizeInteractiveVerificationSummary } from './interactive-verification.ts';
+import type { InteractiveVerificationSummary } from './interactive-verification.ts';
 
 export type EdgeKind = 'derive' | 'probe' | 'challenge' | 'belong';
 const EDGE_KINDS: ReadonlySet<string> = new Set(['derive', 'probe', 'challenge', 'belong']);
@@ -15,13 +17,18 @@ export const DEFAULT_ANSWER_SIZE: NodeSize = { width: 720, height: 480 };
  * 不包含右侧知识说明、分隔条、卡片边框与宿主状态条。
  */
 export const INTERACTIVE_ASPECT_RATIO = 3 / 2;
-export const DEFAULT_INTERACTIVE_SPLIT_RATIO = 0.62;
+/**
+ * 默认分栏占比：左 iframe 占内宽的份额。取值 0.75 使右栏（知识说明）高:宽 = 2:1——
+ * frameHeight = frameWidth / 1.5，explanationWidth = frameHeight / 2，栏间距为 0。
+ * 分栏比例不再提供拖拽调整（分隔条已移除）；旧存档比例经 interactiveSplitFromSize 保留。
+ */
+export const DEFAULT_INTERACTIVE_SPLIT_RATIO = 0.75;
 const INTERACTIVE_SPLIT_MIN = 0.35;
 const INTERACTIVE_SPLIT_MAX = 0.75;
 /** 宿主卡片（card-surface）左右/上下边框合计。 */
 export const INTERACTIVE_CARD_BORDER = 2;
-/** 分栏分隔条占位。 */
-export const INTERACTIVE_DIVIDER_WIDTH = 14;
+/** 左 iframe 与右栏之间的间隙（原分隔条占位；分隔条已移除，靠右栏左边线分隔）。 */
+export const INTERACTIVE_DIVIDER_WIDTH = 0;
 /** 右侧知识说明可读最小宽度。 */
 export const INTERACTIVE_MIN_EXPLANATION_WIDTH = 220;
 /** 低于该 iframe 视口尺寸时宿主限制继续缩小；布局回归覆盖 480×320 及以上。 */
@@ -98,7 +105,7 @@ export function interactiveNodeSize(width: number, splitRatio = DEFAULT_INTERACT
 
 /**
  * 角部缩放等自由尺寸路径：宽高两个候选都保持 iframe 3:2 与右栏最小宽度，
- * 选择偏离用户拖动结果较小的方案，保证水平与垂直拖动都有效。
+ * 选择偏离用户拖动结果较小的方案；分栏比例是缩放不变量，缩放即整体等比变化。
  */
 export function interactiveFreeSize(width: number, height: number, topInset = 0): NodeSize {
   const fromHeight = interactivePlanFromHeight(height, DEFAULT_INTERACTIVE_SPLIT_RATIO, topInset);
@@ -231,11 +238,12 @@ export type ConversationNodeData = {
   explanation?: string;
   prompt?: string | null;
   usage?: Usage | null;
-  /** 正在生成的阶段：generation → check → repair；仅进行中显示。 */
-  phase?: 'generation' | 'check' | 'repair';
+  /** 正在生成的阶段：generation → experiment → check；仅进行中显示。 */
+  phase?: 'generation' | 'experiment' | 'check';
   previewContent?: string;
   fallback?: boolean;
   reviewStatus?: ReviewStatus;
+  verificationSummary?: InteractiveVerificationSummary;
   generationDiagnostic?: GenerationDiagnostic | null;
   technicalStatus?: TechnicalStatus;
   recoveryStatus?: 'verified' | 'unverified' | 'rejected';
@@ -337,6 +345,7 @@ export function exportSessionSnapshot(session: Session, nodes: ConversationNode[
         technicalStatus: node.data.technicalStatus ?? null,
         recoveryStatus: node.data.recoveryStatus ?? null,
         reviewStatus: node.data.reviewStatus ?? null,
+        verificationSummary: node.data.verificationSummary ?? null,
         reviewAdvisories: node.data.reviewAdvisories ?? [],
         content: node.data.content,
         title: node.data.title ?? null,
@@ -454,6 +463,7 @@ export function importSession(text: string): SessionSnapshot {
       const reviewAdvisories = Array.isArray(node.reviewAdvisories)
         ? node.reviewAdvisories.filter((item): item is string => typeof item === 'string').slice(0, 20)
         : [];
+      const verificationSummary = sanitizeInteractiveVerificationSummary(node.verificationSummary);
       return {
         id: imported.id,
         type: interactive ? 'interactive' : reference ? (node.assetKind === 'image' ? 'image' : 'pdf') : 'conversation',
@@ -485,11 +495,13 @@ export function importSession(text: string): SessionSnapshot {
           phase: undefined,
           previewContent: '',
           fallback: status === 'fallback',
-          error: status === 'failed' ? (summary || '此卡片上次生成失败，请重新生成') : status === 'interrupted' ? '生成在会话保存时中断，请重新生成' : '',
+          // 问题节点本身不会生成失败；旧存档可能把回答的失败记在问题上，恢复时不还原该横幅。
+          error: status === 'failed' && role !== 'user' ? (summary || '此卡片上次生成失败，请重新生成') : status === 'interrupted' ? '生成在会话保存时中断，请重新生成' : '',
           generationDiagnostic: summary ? { stage: 'restored', attempts: 0, durationMs: 0, summary, ...(technicalStatus ? { technicalStatus } : {}) } : null,
           technicalStatus,
           recoveryStatus,
           reviewStatus,
+          verificationSummary,
           reviewAdvisories,
           createdAt: isFiniteNumber(node.createdAt) ? node.createdAt : Date.now(),
           highlights: sanitizeHighlights(node.highlights),

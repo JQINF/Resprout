@@ -1,18 +1,17 @@
 /**
  * 生成运行的诊断记录：run/candidate/check 身份、阶段耗时、模型调用用途与 usage、
- * 截断标记、一次修复记录、readiness 检查结论。
+ * 截断标记、版本化 agent 计划/实验/观察证据，以及 readiness 检查结论。
  *
  * 默认不打印完整原始对话；导出是显式动作，带大小上限、截断标记和凭证脱敏。
  * 诊断包包含用户材料，UI 文案必须提示这一点。
  *
- * 生产主流程只有三个阶段：generation → check（readiness）→ 至多一次 repair → check。
- * 诊断包 v2 移除 plan/review/advisories/validations 字段；旧 v1 包仍可由
- * `--replay` 读取（候选内容 + validations 状态），不被本模块改动。
+ * 生产主流程为 agent 计划/制作/实验 → check（readiness）→ 展示或明确失败。
+ * v3 增加可选 agentTrace；旧 v1/v2 包仍可由 `--replay` 读取，不被本模块改动。
  */
 
 import { hashText } from './interactive-html.ts';
 
-export const DIAGNOSTIC_BUNDLE_VERSION = 2;
+export const DIAGNOSTIC_BUNDLE_VERSION = 3;
 export const DIAGNOSTIC_BUNDLE_MAX_BYTES = 1_500_000;
 
 export interface DiagnosticModelRef {
@@ -44,7 +43,7 @@ export interface DiagnosticCallRecord {
   truncated: boolean;
 }
 
-export type DiagnosticCandidateSource = 'initial' | 'repair';
+export type DiagnosticCandidateSource = 'agent' | 'initial' | 'repair';
 
 export interface DiagnosticCandidateRecord {
   candidateId: string;
@@ -90,6 +89,7 @@ export interface DiagnosticBundle {
   candidates: DiagnosticCandidateRecord[];
   checks: DiagnosticCheckRecord[];
   repairs: DiagnosticRepairRecord[];
+  agentTrace?: unknown;
   counters: InteractiveRunCounters;
   truncated: boolean;
   omittedCandidates: number;
@@ -146,7 +146,7 @@ function redactValue(value: unknown): unknown {
 
 /**
  * 一次运行一份记录器。候选 HTML 只保留当前运行产生的内容，不累积历史提示词。
- * 模型调用预算：正常 1 次，至多 2 次（一次修复）；截断续写不再作为独立阶段。
+ * agent 每步诊断快照会让失败与取消也保留已有证据。
  */
 export class InteractiveDiagnosticsRecorder {
   readonly runId: string;
@@ -158,6 +158,7 @@ export class InteractiveDiagnosticsRecorder {
   private readonly candidates: DiagnosticCandidateRecord[] = [];
   private readonly checks: DiagnosticCheckRecord[] = [];
   private readonly repairs: DiagnosticRepairRecord[] = [];
+  private agentTrace: unknown = undefined;
   private counters: InteractiveRunCounters = emptyCounters();
 
   constructor(input: { runId: string; runtimeVersion: string; model?: DiagnosticModelRef | null; createdAt?: number }) {
@@ -239,6 +240,10 @@ export class InteractiveDiagnosticsRecorder {
     this.repairs.push(input);
   }
 
+  recordAgentTrace(value: unknown): void {
+    if (typeof value === 'object' && value !== null) this.agentTrace = value;
+  }
+
   setCounters(counters: InteractiveRunCounters): void {
     this.counters = { ...counters };
   }
@@ -263,6 +268,7 @@ export class InteractiveDiagnosticsRecorder {
       candidates,
       checks: this.checks,
       repairs: this.repairs,
+      ...(this.agentTrace !== undefined ? { agentTrace: this.agentTrace } : {}),
       counters: this.counters,
       truncated: omittedCandidates > 0,
       omittedCandidates,

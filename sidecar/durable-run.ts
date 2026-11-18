@@ -29,16 +29,17 @@ import type {
 import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/node';
 import type { JsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/node';
 import { resolve } from 'node:path';
-import type { AssistantMessage, Message, StopReason } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Message, Models, StopReason } from '@earendil-works/pi-ai';
 import { createProviderModels, deepseekModels, QUICK_ACTION_SYSTEM_PROMPT } from './model-stream.ts';
-import { SEARCH_SYSTEM_PROMPT, streamAnswer } from './agent-loop.ts';
+import { SEARCH_SYSTEM_PROMPT, FETCH_SYSTEM_PROMPT, streamAnswer } from './agent-loop.ts';
 import type { AnswerUsage, ChatEvent, ChatEventListener } from './agent-loop.ts';
 import { providerState, resolveProvider, resolveSearchAccess } from './provider-store.ts';
 import type { ProviderConfig } from './provider-store.ts';
-import { runSearchTool, SEARCH_TOOLS } from './web-search.ts';
+import { runSearchTool, WEB_SEARCH_TOOLS } from './web-search.ts';
+import { FETCH_TOOLS, messagesNeedFetch, runFetchTool } from './web-fetch.ts';
+import { ANSWER_SYSTEM_PROMPT } from './answer-discipline.ts';
 
 const durableRoot = resolve(process.env.RESPROUT_CONFIG_DIR ?? '.resprout', 'durable');
-const MAX_TOOL_ROUNDS = 6;
 
 interface RunIndex extends JsonObject {
   taskId: TaskId<AnswerResult> | null;
@@ -82,6 +83,7 @@ interface ListenerState {
   watch: ConversationWatch | null;
   text: string;
   thinking: string;
+  replaceNextText: boolean;
   toolCalls: Set<string>;
 }
 
@@ -136,7 +138,7 @@ function emit(requestId: string, event: ChatEvent): void {
 function addListener(requestId: string, listener: ChatEventListener): ListenerState {
   let state = listeners.get(requestId);
   if (!state) {
-    state = { listeners: new Set(), watch: null, text: '', thinking: '', toolCalls: new Set() };
+    state = { listeners: new Set(), watch: null, text: '', thinking: '', replaceNextText: false, toolCalls: new Set() };
     listeners.set(requestId, state);
   }
   state.listeners.add(listener);
@@ -163,9 +165,15 @@ function messageParts(message: AssistantMessage | JsonRepresentation<AssistantMe
 
 function emitWatchValue(requestId: string, state: ListenerState, live: LiveState | undefined): void {
   const parts = messageParts(live?.generation?.message);
-  if (parts.text.startsWith(state.text)) {
-    const delta = parts.text.slice(state.text.length);
-    if (delta) emit(requestId, { type: 'text_delta', delta });
+  if (!parts.text && state.text) state.replaceNextText = true;
+  if (parts.text) {
+    if (state.replaceNextText || !parts.text.startsWith(state.text)) {
+      emit(requestId, { type: 'text_delta', delta: parts.text, replace: true });
+    } else {
+      const delta = parts.text.slice(state.text.length);
+      if (delta) emit(requestId, { type: 'text_delta', delta });
+    }
+    state.replaceNextText = false;
   }
   if (parts.thinking.startsWith(state.thinking)) {
     const delta = parts.thinking.slice(state.thinking.length);
@@ -195,7 +203,7 @@ async function attachWatch(requestId: string, conversation: Conversation): Promi
 
 const SearchExtension = defineExtension({
   name: 'resprout.search',
-  tools: SEARCH_TOOLS.map(tool => defineTool({
+  tools: WEB_SEARCH_TOOLS.map(tool => defineTool({
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
@@ -205,6 +213,23 @@ const SearchExtension = defineExtension({
         return { output: [{ type: 'text' as const, text: '联网搜索尚未配置 API Key' }], isError: true };
       }
       const result = await runSearchTool(access, tool.name, args as JsonObject, []);
+      return {
+        output: [{ type: 'text' as const, text: result.output }],
+        isError: result.isError,
+      };
+    },
+  })),
+});
+
+// 本地网页抓取：不依赖 DeepSeek，链接或明确查阅意图时启用。
+const FetchExtension = defineExtension({
+  name: 'resprout.fetch',
+  tools: FETCH_TOOLS.map(tool => defineTool({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+    execute: async args => {
+      const result = await runFetchTool(tool.name, args as JsonObject);
       return {
         output: [{ type: 'text' as const, text: result.output }],
         isError: result.isError,
@@ -246,7 +271,7 @@ const AnswerTask = defineTask<AnswerTaskInput, AnswerState, AnswerResult, object
           modelId,
           context: { messages },
           signal: runtime.signal,
-          maxTokens: 4096,
+          maxTokens: 32768,
           options: { quickAction, webSearch },
           onEvent: async event => {
             if (event.type === 'text_delta') text += event.delta;
@@ -284,6 +309,26 @@ function primaryModelId(provider: ProviderConfig): string {
   return modelId;
 }
 
+// pi-durable 的流设置不暴露 maxTokens，单轮输出预算会落到供应商默认值：推理模型 + 工具调用时，
+// 预算很容易在工具调用 JSON 输出完之前耗尽（stopReason "length"），pi-durable 又会把这条
+// 截断消息当作最终回答（计划/思考过程当回答）。包装 Models，给每次模型调用注入充足的输出预算。
+// createModels() 返回类实例（方法在原型上），不能用展开复制，用 Proxy 委托。
+function withOutputBudget(models: Models, maxTokens: number): Models {
+  const fill = (options: { maxTokens?: number } | undefined): { maxTokens?: number } =>
+    ({ ...(options ?? {}), maxTokens: options?.maxTokens ?? maxTokens });
+  const streamMethods = new Set(['stream', 'complete', 'streamSimple', 'completeSimple']);
+  return new Proxy(models, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value === 'function' && streamMethods.has(String(prop))) {
+        return (model: never, context: never, options?: { maxTokens?: number }) =>
+          (value as (m: never, c: never, o?: { maxTokens?: number }) => unknown).call(target, model, context, fill(options));
+      }
+      return value;
+    },
+  });
+}
+
 async function getHarness(provider: ProviderConfig): Promise<HarnessBundle> {
   let bundle = harnesses.get(provider.id);
   if (!bundle) {
@@ -291,7 +336,8 @@ async function getHarness(provider: ProviderConfig): Promise<HarnessBundle> {
       const registry = createRegistry();
       registry.install({ name: 'resprout', tasks: [AnswerTask] });
       registry.install(SearchExtension);
-      const models = createProviderModels(provider, primaryModelId(provider));
+      registry.install(FetchExtension);
+      const models = withOutputBudget(createProviderModels(provider, primaryModelId(provider)), 32768);
       const storage = await openNodeJsonlStorage(resolve(durableRoot, encodeURIComponent(provider.id)), BACKGROUND_CONTEXT);
       const harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
       harness.resume();
@@ -370,20 +416,27 @@ function compactionFor(provider: ProviderConfig, modelId: string): CompactionSet
   };
 }
 
-function agentFor(
+export function agentFor(
   provider: ProviderConfig,
   modelId: string,
   quickAction: boolean,
   webSearch: boolean,
+  wantFetch: boolean,
 ): AgentChange {
   const instructions = [
+    ANSWER_SYSTEM_PROMPT,
     quickAction ? QUICK_ACTION_SYSTEM_PROMPT : '',
     webSearch ? SEARCH_SYSTEM_PROMPT : '',
+    wantFetch && !webSearch ? FETCH_SYSTEM_PROMPT : '',
   ].filter(Boolean).join('\n\n');
   return {
     model: { provider: provider.kind === 'deepseek' ? 'deepseek' : provider.id, modelId },
-    extensions: webSearch ? [SearchExtension] : [],
-    maxTurns: MAX_TOOL_ROUNDS,
+    extensions: [
+      ...(webSearch ? [SearchExtension] : []),
+      ...(wantFetch ? [FetchExtension] : []),
+    ],
+    // undefined 会保留 fork 父会话的旧上限，null 才表示清除。
+    maxTurns: null,
     compaction: compactionFor(provider, modelId),
     ...(instructions ? { instructions } : {}),
   };
@@ -394,7 +447,7 @@ async function createConversation(
   input: DurableChatInput,
 ): Promise<Conversation | null> {
   const { provider, modelId, sessionId, parentRequestId, quickAction = false, webSearch = false } = input;
-  const agent = agentFor(provider, modelId, quickAction, webSearch);
+  const agent = agentFor(provider, modelId, quickAction, webSearch, messagesNeedFetch(input.messages));
   if (!parentRequestId) {
     return harness.createConversation({ ownership: { kind: 'ownerless' }, agent }, BACKGROUND_CONTEXT);
   }
@@ -502,6 +555,10 @@ async function submitConversationAnswer(input: DurableChatInput): Promise<Answer
   if (!submission) throw new Error('无法读取已提交的回答任务');
   const settled = await submission.wait(BACKGROUND_CONTEXT);
   if (settled.status !== 'done') {
+    if (settled.reason === 'turn_limit') {
+      const turns = Number.parseInt(String(settled.detail ?? ''), 10);
+      throw new Error(`回答中断：模型把${Number.isFinite(turns) ? ` ${turns} 轮` : ''}工具调用全部用完，没能写出最终回答。请把问题拆得更具体一些，或指出最需要看的文件。`);
+    }
     const detail = typeof settled.detail === 'string' ? settled.detail : settled.reason;
     throw new Error(detail ?? '回答任务未成功');
   }

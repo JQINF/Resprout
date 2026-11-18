@@ -33,6 +33,8 @@ import NodeResizeCorners from './NodeResizeCorners.tsx';
 import NodeCard from './NodeCard.tsx';
 import ImageNode from './ImageNode.tsx';
 import Select from './Select.tsx';
+import PinnedPanel from './PinnedPanel.tsx';
+import { NodePinButton } from './NodePin.tsx';
 import { formatNodeTime, styleDimension } from './node-utils.ts';
 import { useNodeResizeState } from './use-node-resize-state.ts';
 import { useFlowGraph, visibleLayoutGraph } from './use-flow-graph.ts';
@@ -46,13 +48,13 @@ import {
   importSession,
 } from './session.ts';
 import { readSessionRecord, saveSessionSnapshot } from './session-library.ts';
-import { buildQuickActionPrompt, saveQuickActions } from './quick-actions.ts';
-import type { QuickAction } from './quick-actions.ts';
 import { buildBranchTrees, plainPreview } from './branch-manager.ts';
 import type { BranchMainlineItem, BranchSideItem, BranchTree } from './branch-manager.ts';
 import { readPdfFile } from './pdf-store.ts';
-import { clusterLineRects, textRangeRects, normalizedRangeStart } from './text-selection.ts';
-import type { RectLike } from './text-selection.ts';
+import { buildQuoteSelection, quotePopupScreenStyle, QuoteHighlight, QuotePopup, useQuoteHighlights } from './quote.tsx';
+import type { QuoteSelection } from './quote.tsx';
+import { CHAIN_COLORS, chainColorIndex } from './chain-colors.ts';
+import type { ChainColor } from './chain-colors.ts';
 import { cacheCurrentSession, cachedSession, useStore } from './store.ts';
 import type {
   Anchor,
@@ -66,20 +68,7 @@ type NodeData = ConversationNodeData;
 type EdgeData = ConversationEdgeData;
 type GraphNode = ConversationFlowNode;
 type GraphEdge = ConversationEdge;
-type RectBox = RectLike;
 type SizedNode = Pick<ConversationFlowNode, 'data' | 'measured' | 'style'>;
-
-type ChainColor = { stroke: string; soft: string; border: string; fill: string };
-
-type QuoteSelection = {
-  text: string;
-  sourceText: string;
-  textStart: number;
-  anchor: Anchor | null;
-  left: number;
-  top: number;
-  boxes: RectBox[];
-};
 
 type ScrollState = { top: number; height: number; visible: boolean };
 type MarqueeBox = { x1: number; y1: number; x2: number; y2: number };
@@ -109,160 +98,6 @@ function closestElement(target: EventTarget | null, selector: string): Element |
 function clearTimer(timer: { current: ReturnType<typeof setTimeout> | null }): void {
   if (timer.current !== null) clearTimeout(timer.current);
   timer.current = null;
-}
-
-function mathContentRects(math: Element): RectBox[] {
-  const content = math.querySelector('.katex-html');
-  const bases = Array.from(content?.children ?? []).filter(element => element.classList.contains('base'));
-  const rects = bases.flatMap(base => Array.from(base.getClientRects())
-    .filter(rect => rect.width > 0.5 && rect.height > 0.5)
-    .map(rect => ({ x: rect.left, y: rect.top, w: rect.width, h: rect.height })));
-  const merged = clusterLineRects(rects, Infinity);
-  if (merged.length) return merged;
-  const range = document.createRange();
-  range.selectNodeContents(math);
-  return textRangeRects(range, math);
-}
-
-function measureQuoteRects(root: HTMLElement, quote: string, sourceQuote = '', textStart: number | null = null): RectBox[] | null {
-  const mathSource = sourceQuote.trim().match(/^\$([\s\S]+)\$$/)?.[1];
-  if (mathSource) {
-    const math = Array.from(root.querySelectorAll('.katex')).find(element =>
-      element.querySelector('.katex-mathml annotation[encoding="application/x-tex"]')?.textContent === mathSource);
-    if (math) return mathContentRects(math);
-  }
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, node =>
-    node.parentElement?.closest('.katex-mathml') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT);
-  const nodes: { node: Text; start: number }[] = [];
-  let haystack = '';
-  let node = walker.nextNode();
-  while (node) {
-    if (node instanceof Text) {
-      nodes.push({ node, start: haystack.length });
-      haystack += node.data;
-    }
-    node = walker.nextNode();
-  }
-  const normMap: number[] = [];
-  let norm = '';
-  for (let i = 0; i < haystack.length; i += 1) {
-    const ch = haystack.charAt(i);
-    if (/\s/.test(ch) || /[\u200b\u200c\u200d\ufeff]/.test(ch)) continue;
-    normMap.push(i);
-    norm += ch;
-  }
-  const normalizedQuote = quote.replace(/[\s\u200b\u200c\u200d\ufeff]/g, '');
-  const savedStartMatches = typeof textStart === 'number'
-    && Number.isInteger(textStart)
-    && norm.slice(textStart, textStart + normalizedQuote.length) === normalizedQuote;
-  const normIndex = savedStartMatches && typeof textStart === 'number' ? textStart : norm.indexOf(normalizedQuote);
-  if (normIndex < 0 || !normalizedQuote) return null;
-  const index = normMap[normIndex];
-  const endIndex = normMap[normIndex + normalizedQuote.length - 1];
-  if (index === undefined || endIndex === undefined) return null;
-  const end = endIndex + 1;
-  const range = document.createRange();
-  let started = false;
-  for (const { node: textNode, start } of nodes) {
-    const length = textNode.data.length;
-    if (!started && index < start + length) {
-      range.setStart(textNode, index - start);
-      started = true;
-    }
-    if (started && end <= start + length) {
-      range.setEnd(textNode, end - start);
-      const rects = textRangeRects(range, root);
-      return rects.length ? rects : null;
-    }
-  }
-  return null;
-}
-
-function selectionContentText(node: Node): string {
-  if (node instanceof Text) return node.data;
-  if (!(node instanceof Element)) {
-    return Array.from(node.childNodes).map(selectionContentText).join('');
-  }
-  if (node.classList.contains('katex-mathml')) return '';
-  if (node.classList.contains('katex')) {
-    const source = node.querySelector('.katex-mathml annotation[encoding="application/x-tex"]')?.textContent;
-    if (source) return `$${source}$`;
-  }
-  if (node.tagName === 'BR') return '\n';
-  const value = Array.from(node.childNodes).map(selectionContentText).join('');
-  return /^(?:P|DIV|LI|H[1-6]|BLOCKQUOTE|PRE)$/.test(node.tagName) ? `${value}\n` : value;
-}
-
-function mathForSelection(range: Range, contentEl: HTMLElement): Element | null {
-  const selectedMath = Array.from(contentEl.querySelectorAll('.katex')).filter(element => range.intersectsNode(element));
-  if (selectedMath.length !== 1) return null;
-  const [math] = selectedMath;
-  if (!math) return null;
-  const normalize = (value: string) => value.replace(/[\s\u200b\u200c\u200d\ufeff]/g, '');
-  const selectedText = normalize(range.toString());
-  const mathText = normalize(math.querySelector('.katex-html')?.textContent ?? '');
-  if (!selectedText) return null;
-  if (selectedText === mathText) return math;
-  if (selectedText.length !== mathText.length) return null;
-  const sortCharacters = (value: string) => Array.from(value).sort().join('');
-  return sortCharacters(selectedText) === sortCharacters(mathText) ? math : null;
-}
-
-function selectionSourceText(range: Range, contentEl: HTMLElement, mathElement: Element | null = mathForSelection(range, contentEl)): string {
-  if (mathElement) {
-    const source = mathElement.querySelector('.katex-mathml annotation[encoding="application/x-tex"]')?.textContent;
-    if (source) return `$${source}$`;
-  }
-  return selectionContentText(range.cloneContents()).trim();
-}
-
-const CHAIN_COLORS: ChainColor[] = [
-  { stroke: '#6f9ec7', soft: 'rgba(111, 158, 199, 0.36)', border: '#c3d2e2', fill: '#f0f5fb' },
-  { stroke: '#c79a6f', soft: 'rgba(199, 154, 111, 0.36)', border: '#e2cdb8', fill: '#faf3ec' },
-  { stroke: '#9a7fc7', soft: 'rgba(154, 127, 199, 0.36)', border: '#d0c4e4', fill: '#f4effb' },
-  { stroke: '#62ad8b', soft: 'rgba(98, 173, 139, 0.36)', border: '#bed9cb', fill: '#edf6f1' },
-  { stroke: '#c76f8e', soft: 'rgba(199, 111, 142, 0.36)', border: '#e4c2cf', fill: '#fbeef3' },
-];
-
-function chainColorIndex(edges: GraphEdge[], edge: GraphEdge | null | undefined): number {
-  if (!edge) return -1;
-  const colorEdge = edge.data?.highlightId
-    ? edges.find(item => item.source === edge.source && item.data?.kind === 'probe' && item.data?.highlightId === edge.data?.highlightId) ?? edge
-    : edge;
-  const probes = edges.filter(item => item.source === colorEdge.source && item.data?.kind === 'probe');
-  const index = probes.indexOf(colorEdge);
-  return index < 0 ? -1 : index % CHAIN_COLORS.length;
-}
-
-function QuoteHighlight({ boxes = [], soft }: { boxes?: RectBox[]; soft?: string }) {
-  if (!boxes.length) return null;
-  const left = Math.min(...boxes.map(rect => rect.x));
-  const top = Math.min(...boxes.map(rect => rect.y));
-  const right = Math.max(...boxes.map(rect => rect.x + rect.w));
-  const bottom = Math.max(...boxes.map(rect => rect.y + rect.h));
-  const width = right - left;
-  const height = bottom - top;
-  return (
-    <svg
-      className="quote-highlight"
-      aria-hidden="true"
-      style={{ left, top, width, height }}
-      viewBox={`0 0 ${width} ${height}`}
-    >
-      {boxes.map((rect, index) => (
-        <rect
-          key={index}
-          className="quote-highlight-fill"
-          x={rect.x - left}
-          y={rect.y - top}
-          width={rect.w}
-          height={rect.h}
-          rx={3}
-          style={{ fill: soft }}
-        />
-      ))}
-    </svg>
-  );
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -310,8 +145,6 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
   const setNodeModel = useStore(state => state.setNodeModel);
   const providers = useStore(state => state.providers);
   const activeProvider = useStore(state => state.activeProvider);
-  const quickActions = useStore(state => state.quickActions);
-  const setQuickActions = useStore(state => state.setQuickActions);
   const nodePosition = useStore(state => state.nodes.find(node => node.id === id)?.position);
   const parentEdge = useStore(state => state.edges.find(edge => edge.target === id));
   const grandProbe = useStore(state => parentEdge
@@ -323,8 +156,6 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
   const questionInputRef = useRef<HTMLTextAreaElement>(null);
   const [nodeRootEl, setNodeRootEl] = useState<Element | null>(null);
   const [quoteButton, setQuoteButton] = useState<QuoteSelection | null>(null);
-  const [measureTick, setMeasureTick] = useState(0);
-  const [highlightBoxes, setHighlightBoxes] = useState<Record<string, RectBox[]>>({});
   const [scrollState, setScrollState] = useState<ScrollState>({ top: 0, height: 0, visible: false });
   const isAssistant = data.role === 'assistant';
   const selectedModel = data.model ?? activeProvider;
@@ -359,12 +190,7 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
 
   function quotePopupStyle(): CSSProperties {
     if (!nodeRootEl || !quoteButton) return {};
-    const rect = nodeRootEl.getBoundingClientRect();
-    const zoom = getViewport().zoom || 1;
-    return {
-      left: rect.left + quoteButton.left * zoom,
-      top: rect.top + quoteButton.top * zoom,
-    };
+    return quotePopupScreenStyle(nodeRootEl, quoteButton, getViewport);
   }
 
   function updateScrollState() {
@@ -400,10 +226,6 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
     document.addEventListener('mouseup', up);
     move(event.nativeEvent);
   }
-  const [inputValue, setInputValue] = useState('');
-  const [selectionCopied, setSelectionCopied] = useState(false);
-  const [actionsEditorOpen, setActionsEditorOpen] = useState(false);
-  const [editingActionIndex, setEditingActionIndex] = useState(0);
   const [editing, setEditing] = useState(!data.content || Boolean(data.autoFocus));
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -417,6 +239,16 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
   const questionCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const questionCollapsed = checkpoint && isEdgeQuestion && !questionDraft && !questionExpanded && Boolean(data.content);
   const { resizing, onResizeStart, onResizeEnd } = useNodeResizeState();
+  const pinned = useStore(state => state.pinnedNodeId === id);
+  const pinNode = useStore(state => state.pinNode);
+  const highlightBoxes = useQuoteHighlights({
+    nodeId: id,
+    contentRef,
+    highlights: data.highlights,
+    content: data.content,
+    pending: data.pending,
+    enabled: !pinned,
+  });
 
   useEffect(() => {
     if (!editing) return;
@@ -489,177 +321,39 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
   useEffect(() => {
     const contentEl = contentRef.current;
     if (!contentEl) return;
-    const bump = () => setMeasureTick(tick => tick + 1);
-    const onScroll = () => window.requestAnimationFrame(bump);
-    contentEl.addEventListener('scroll', onScroll, { passive: true });
-    const observer = new ResizeObserver(bump);
+    const update = () => window.requestAnimationFrame(updateScrollState);
+    contentEl.addEventListener('scroll', update, { passive: true });
+    const observer = new ResizeObserver(updateScrollState);
     observer.observe(contentEl);
     return () => {
-      contentEl.removeEventListener('scroll', onScroll);
+      contentEl.removeEventListener('scroll', update);
       observer.disconnect();
     };
   }, []);
 
-  const measurementKey = JSON.stringify((data.highlights ?? []).map(highlight => [
-    highlight.id,
-    highlight.quote,
-    highlight.textStart,
-    edges.find(edge => edge.data?.highlightId === highlight.id)?.data.quote ?? '',
-  ]));
-
   useLayoutEffect(() => {
     updateScrollState();
-  }, [data.content, measureTick]);
-
-  useEffect(() => {
-    const contentEl = contentRef.current;
-    if (!contentEl) return;
-    const highlights = data.highlights ?? [];
-    if (!highlights.length) {
-      setHighlightBoxes(current => Object.keys(current).length ? {} : current);
-      return;
-    }
-    let cancelled = false;
-    const measure = (): void => {
-      if (cancelled) return;
-      const contentRect = contentEl.getBoundingClientRect();
-      const zoom = getViewport().zoom || 1;
-      const scrollX = contentEl.scrollLeft;
-      const scrollY = contentEl.scrollTop;
-      const nodeEl = contentEl.closest('.react-flow__node');
-      const nodeRect = nodeEl?.getBoundingClientRect();
-      const offsetX = nodeRect ? (contentRect.left - nodeRect.left) / zoom : 0;
-      const offsetY = nodeRect ? (contentRect.top - nodeRect.top) / zoom : 0;
-      const scrollW = contentEl.scrollWidth;
-      const scrollH = contentEl.scrollHeight;
-      const visTop = scrollY + 6;
-      const visBottom = scrollY + contentEl.clientHeight - 6;
-      const boxes: Record<string, RectBox[]> = {};
-      for (const highlight of highlights) {
-        const sourceQuote = useStore.getState().edges.find(edge => edge.data?.highlightId === highlight.id)?.data?.quote ?? '';
-        const rects = measureQuoteRects(contentEl, highlight.quote, sourceQuote, highlight.textStart ?? null);
-        if (!rects) {
-          useStore.getState().updateHighlightAnchor(id, highlight.id, null);
-          continue;
-        }
-        const list = rects.map(rect => {
-          let bx = (rect.x - contentRect.left) / zoom + scrollX - 2;
-          let by = (rect.y - contentRect.top) / zoom + scrollY - 2;
-          let bw = rect.w / zoom + 4;
-          let bh = rect.h / zoom + 4;
-          bx = Math.max(1, Math.min(bx, scrollW - 2));
-          by = Math.max(1, Math.min(by, scrollH - 2));
-          bw = Math.max(4, Math.min(bw, scrollW - 1 - bx));
-          bh = Math.max(4, Math.min(bh, scrollH - 1 - by));
-          return { x: bx, y: by, w: bw, h: bh };
-        });
-        boxes[highlight.id] = list;
-        const last = list[list.length - 1];
-        if (!last) continue;
-        const selectionTop = Math.min(...list.map(rect => rect.y));
-        const selectionBottom = Math.max(...list.map(rect => rect.y + rect.h));
-        const centerY = (selectionTop + selectionBottom) / 2;
-        const clampedY = Math.min(Math.max(centerY, visTop), visBottom);
-        const nodeWidth = nodeRect ? nodeRect.width / zoom : null;
-        useStore.getState().updateHighlightAnchor(id, highlight.id, {
-          x: nodeWidth ?? offsetX + last.x + last.w - scrollX,
-          y: offsetY + clampedY - scrollY,
-        });
-      }
-      setHighlightBoxes(boxes);
-    };
-    if (data.pending) {
-      const timer = setTimeout(measure, 120);
-      return () => {
-        cancelled = true;
-        clearTimeout(timer);
-      };
-    }
-    measure();
-    return () => {
-      cancelled = true;
-    };
-  }, [id, data.content, data.pending, measureTick, measurementKey]);
+  }, [data.content, highlightBoxes]);
 
   function handleContentMouseUp(event: ReactMouseEvent<HTMLDivElement>) {
     if (closestElement(event.target, '.quote-popup')) return;
     const contentEl = contentRef.current;
-    const selection = window.getSelection();
-    if (!contentEl || !selection || selection.isCollapsed || !selection.rangeCount) {
+    if (!contentEl) {
       setQuoteButton(null);
       return;
     }
-    const text = selection.toString().trim();
-    const range = selection.getRangeAt(0);
-    if (!text || !contentEl.contains(range.startContainer) || !contentEl.contains(range.endContainer)) {
-      setQuoteButton(null);
-      return;
-    }
-    const mathElement = mathForSelection(range, contentEl);
-    const contentRect = contentEl.getBoundingClientRect();
-    const zoom = getViewport().zoom || 1;
-    const scrollX = contentEl.scrollLeft;
-    const scrollY = contentEl.scrollTop;
-    const toLocal = (rect: RectBox) => ({
-      x: (rect.x - contentRect.left) / zoom + scrollX,
-      y: (rect.y - contentRect.top) / zoom + scrollY,
-      w: rect.w / zoom,
-      h: rect.h / zoom,
-    });
-    const clientRects = mathElement ? mathContentRects(mathElement) : textRangeRects(range, contentEl);
-    const rects = clientRects.map(toLocal);
-    if (!rects.length) {
-      setQuoteButton(null);
-      return;
-    }
-    let anchor: Anchor | null = null;
-    if (nodePosition) {
-      const lastClient = clientRects[clientRects.length - 1];
-      const right = lastClient ? lastClient.x + lastClient.w : range.getBoundingClientRect().right;
-      const selectionTop = Math.min(...clientRects.map(rect => rect.y));
-      const selectionBottom = Math.max(...clientRects.map(rect => rect.y + rect.h));
-      const centerY = (selectionTop + selectionBottom) / 2;
-      const point = screenToFlowPosition({ x: right, y: centerY });
-      anchor = { x: point.x - nodePosition.x, y: point.y - nodePosition.y };
-    }
-    const first = rects[0];
-    if (!first) {
-      setQuoteButton(null);
-      return;
-    }
-    const bottom = Math.max(...rects.map(rect => rect.y + rect.h));
-    const popupLeft = Math.max(12, Math.min(first.x, contentEl.scrollWidth - 380));
-    const previewBoxes = rects.map(rect => ({
-      x: Math.max(1, rect.x - 2),
-      y: Math.max(1, rect.y - 2),
-      w: rect.w + 4,
-      h: rect.h + 4,
+    setQuoteButton(buildQuoteSelection({
+      eventTarget: event.target,
+      contentEl,
+      nodePosition: nodePosition ?? null,
+      getViewport,
+      screenToFlowPosition,
     }));
-    const nodeEl = contentEl.closest('.react-flow__node');
-    const nodeRectNow = nodeEl?.getBoundingClientRect();
-    const offsetX = nodeRectNow ? (contentRect.left - nodeRectNow.left) / zoom : 0;
-    const offsetY = nodeRectNow ? (contentRect.top - nodeRectNow.top) / zoom : 0;
-    setQuoteButton({
-      text,
-      sourceText: selectionSourceText(range, contentEl, mathElement) || text,
-      textStart: normalizedRangeStart(contentEl, range),
-      anchor,
-      left: offsetX + (popupLeft - scrollX),
-      top: offsetY + (bottom - scrollY) + 8 / zoom,
-      boxes: previewBoxes,
-    });
-    setInputValue('');
-    setSelectionCopied(false);
-    setActionsEditorOpen(false);
-    selection.removeAllRanges();
   }
 
   function finishQuote() {
     window.getSelection()?.removeAllRanges();
     setQuoteButton(null);
-    setInputValue('');
-    setSelectionCopied(false);
-    setActionsEditorOpen(false);
   }
 
   function revealNode(nodeId: string) {
@@ -682,9 +376,8 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
     });
   }
 
-  function submitInput() {
-    const question = inputValue.trim();
-    if (!question || !quoteButton) return;
+  function submitQuestion(question: string, prompt?: string | null) {
+    if (!quoteButton) return;
     const questionId = askFromSelection({
       sourceId: id,
       quote: quoteButton.sourceText,
@@ -692,6 +385,7 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
       textStart: quoteButton.textStart,
       anchor: quoteButton.anchor,
       question,
+      prompt: prompt ?? null,
     });
     finishQuote();
     revealNode(questionId);
@@ -699,25 +393,7 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
 
   async function copySelection() {
     if (!quoteButton) return;
-    const ok = await copyText(quoteButton.sourceText);
-    if (!ok) return;
-    setSelectionCopied(true);
-    setTimeout(() => setSelectionCopied(false), 1800);
-  }
-
-  function runQuickAction(action: QuickAction) {
-    if (!quoteButton) return;
-    const questionId = askFromSelection({
-      sourceId: id,
-      quote: quoteButton.sourceText,
-      highlightQuote: quoteButton.text,
-      textStart: quoteButton.textStart,
-      anchor: quoteButton.anchor,
-      question: action.label,
-      prompt: buildQuickActionPrompt(action, quoteButton.sourceText),
-    });
-    finishQuote();
-    revealNode(questionId);
+    await copyText(quoteButton.sourceText);
   }
 
   function generateSelectionInteractive() {
@@ -763,24 +439,21 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
     if (typeof questionId === 'string') revealNode(questionId);
   }
 
-  function updateQuickAction(index: number, patch: Partial<QuickAction>) {
-    setQuickActions(actions => actions.map((action, actionIndex) =>
-      actionIndex === index ? { ...action, ...patch } : action));
-  }
-
-  function removeQuickAction(index: number) {
-    setQuickActions(actions => actions.filter((_, actionIndex) => actionIndex !== index));
-    setEditingActionIndex(0);
-  }
-
-  function addQuickAction() {
-    setEditingActionIndex(quickActions.length);
-    setQuickActions(actions => [...actions, { id: crypto.randomUUID(), label: '新按钮', prompt: '{text}' }]);
-  }
-
-  function closeActionsEditor() {
-    saveQuickActions(quickActions);
-    setActionsEditorOpen(false);
+  if (pinned) {
+    return (
+      <div className={`conversation-node ${isAssistant ? 'assistant' : 'question'} is-docked`} aria-hidden="true">
+        {!checkpoint && <Handle type="target" position={Position.Left} />}
+        {!checkpoint && <Handle type="source" position={Position.Right} id="right" className="docked-output" />}
+        {isAssistant && !checkpoint && (
+          <Handle
+            type="source"
+            position={Position.Left}
+            id="left"
+            style={{ top: '75%', opacity: 0 }}
+          />
+        )}
+      </div>
+    );
   }
 
   return (
@@ -839,7 +512,11 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
           </div>
         )}
         {isAssistant && <NodeResizeCorners id={id} onResizeStart={onResizeStart} onResizeEnd={onResizeEnd} />}
-        <NodeCard className={isAssistant ? 'assistant' : 'question'} style={chain ? { background: chain.fill, borderColor: chain.border } : undefined}>
+        <NodeCard
+          className={isAssistant ? 'assistant' : 'question'}
+          style={chain ? { background: chain.fill, borderColor: chain.border } : undefined}
+          frameAction={isAssistant ? <NodePinButton pinned={false} title="固定到左侧" onToggle={() => pinNode(id)} /> : undefined}
+        >
           {isAssistant ? (
           <div className="answer-wrap">
             <div ref={contentRef} className="answer-content nodrag nowheel" onMouseUp={handleContentMouseUp}>
@@ -866,95 +543,16 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
               />
             )}
             {quoteButton && nodeRootEl && createPortal(
-              <div
-                className="quote-popup nodrag nowheel"
+              <QuotePopup
+                key={`${quoteButton.textStart}:${quoteButton.text.length}`}
                 style={quotePopupStyle()}
-                onMouseDown={event => {
-                  if (!closestElement(event.target, 'input, textarea, [contenteditable="true"]')) event.preventDefault();
-                }}
-              >
-                <Surface className="quote-popup-row">
-                  <input
-                    className="quote-input"
-                    aria-label="追问内容"
-                    value={inputValue}
-                    autoFocus
-                    placeholder="补充说明或提问，Enter 发送"
-                    onChange={event => setInputValue(event.target.value)}
-                    onKeyDown={event => {
-                      if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
-                      event.preventDefault();
-                      submitInput();
-                    }}
-                  />
-                  <div className="quote-fixed-actions" role="group" aria-label="固定操作">
-                    <button
-                      type="button"
-                      className="quote-action quote-interactive"
-                      title="将选中内容生成互动解释"
-                      onClick={generateSelectionInteractive}
-                    ><DockIcon name="interactive" />生成交互</button>
-                    <button
-                      type="button"
-                      className="quote-action"
-                      onClick={copySelection}
-                    >{selectionCopied ? '已复制' : '复制文本'}</button>
-                  </div>
-                </Surface>
-                <div className="quote-presets" role="group" aria-label="预设与设置">
-                  {quickActions.map(action => (
-                    <button
-                      key={action.id}
-                      type="button"
-                      className="quote-action"
-                      onClick={() => runQuickAction(action)}
-                    >{action.label}</button>
-                  ))}
-                  <button
-                    type="button"
-                    className={`quote-gear${actionsEditorOpen ? ' is-open' : ''}`}
-                    aria-label="编辑快捷按钮"
-                    aria-expanded={actionsEditorOpen}
-                    onClick={() => setActionsEditorOpen(value => !value)}
-                  ><DockIcon name="settings" /></button>
-                </div>
-                {actionsEditorOpen && (
-                  <Surface className="quote-actions-editor">
-                    <div className="qae-title"><span>快捷按钮</span><span>prompt 中 {'{text}'} 表示选中内容</span></div>
-                    <div className="qae-edit-tip">点击预设输入框，可修改标题并展开提示词</div>
-                    {quickActions.map((action, index) => (
-                      <div className={`qae-row${editingActionIndex === index ? ' is-editing' : ''}`} key={action.id}>
-                        <input
-                          className="qae-label"
-                          value={action.label}
-                          aria-label="预设标题"
-                          aria-expanded={editingActionIndex === index}
-                          placeholder="预设标题"
-                          title="点击修改标题和提示词"
-                          onFocus={() => setEditingActionIndex(index)}
-                          onChange={event => updateQuickAction(index, { label: event.target.value })}
-                        />
-                        {editingActionIndex === index && (
-                          <textarea
-                            className="qae-prompt"
-                            value={action.prompt}
-                            aria-label="自定义 prompt"
-                            placeholder="自定义 prompt"
-                            rows={3}
-                            onChange={event => updateQuickAction(index, { prompt: event.target.value })}
-                          />
-                        )}
-                        <button type="button" className="qae-delete" aria-label={`移除预设 ${action.label}`} onClick={() => removeQuickAction(index)}>移除</button>
-                      </div>
-                    ))}
-                    <div className="qae-footer">
-                      <button type="button" onClick={addQuickAction}>+ 添加按钮</button>
-                      <button type="button" className="qae-save" onClick={closeActionsEditor}>完成</button>
-                    </div>
-                  </Surface>
-                )}
-              </div>
-            , document.body)}
+                sourceText={quoteButton.sourceText}
+                onSubmit={submitQuestion}
+                onGenerateInteractive={generateSelectionInteractive}
+                onCopy={copySelection}
+              />,
+              document.body,
+            )}
             </div>
             {scrollState.visible && (
               <div className="fake-scrollbar nodrag" onMouseDown={onScrollbarMouseDown}>
@@ -1227,7 +825,28 @@ function Canvas({ onMessage }: { onMessage: (message: string) => void }) {
   const onNodesChange = useStore(state => state.onNodesChange);
   const onEdgesChange = useStore(state => state.onEdgesChange);
   const onConnect = useStore(state => state.onConnect);
-  const { screenToFlowPosition, fitView } = useReactFlow();
+  const pinnedNodeId = useStore(state => state.pinnedNodeId);
+  const pinnedPanelWidth = useStore(state => state.pinnedPanelWidth);
+  const previousPinnedIdRef = useRef<string | null>(null);
+  const { screenToFlowPosition, fitView, getViewport, setViewport } = useReactFlow();
+  const applyPinnedDock = useCallback(() => {
+    const state = useStore.getState();
+    const id = state.pinnedNodeId;
+    const panelWidth = state.pinnedPanelWidth;
+    if (!id || !panelWidth) return;
+    const node = state.nodes.find(item => item.id === id);
+    if (!node) return;
+    const zoom = getViewport().zoom || 1;
+    const topLeft = screenToFlowPosition({ x: 0, y: 0 });
+    useStore.setState(current => ({
+      nodes: current.nodes.map(item => item.id === id ? {
+        ...item,
+        position: { x: topLeft.x, y: topLeft.y },
+        style: { ...item.style, width: panelWidth / zoom, height: window.innerHeight / zoom },
+      } : item),
+      pinnedDockTick: current.pinnedDockTick + 1,
+    }));
+  }, [getViewport, screenToFlowPosition]);
   const previousNodeIds = useRef<Set<string>>(new Set());
   const [connectionMenu, setConnectionMenu] = useState<ConnectionMenu | null>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
@@ -1363,8 +982,78 @@ function Canvas({ onMessage }: { onMessage: (message: string) => void }) {
   useOnViewportChange({
     onChange: ({ zoom }) => {
       canvasHostRef.current?.style.setProperty('--node-drag-outset', `${12 / zoom}px`);
+      if (useStore.getState().pinnedNodeId) applyPinnedDock();
     },
   });
+
+  // 滚动平移等场景 onChange 不一定每帧触发：固定期间用 rAF 兜底，视口一变立即重停靠。
+  useEffect(() => {
+    if (!pinnedNodeId) return;
+    let raf = 0;
+    let lastKey = '';
+    const loop = () => {
+      const viewport = getViewport();
+      const key = `${viewport.x},${viewport.y},${viewport.zoom}`;
+      if (key !== lastKey) {
+        lastKey = key;
+        applyPinnedDock();
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [pinnedNodeId, getViewport, applyPinnedDock]);
+
+  useEffect(() => {
+    const state = useStore.getState();
+    const prevId = previousPinnedIdRef.current;
+    if (prevId && prevId !== state.pinnedNodeId) {
+      const restore = state.pinnedRestore;
+      if (restore) {
+        // 固定期间只有子树可见，子树节点可能被拖动或整理过，视口也可能被平移：按固定前的快照整体还原。
+        const savedById = new Map(restore.nodes.map(item => [item.id, item]));
+        useStore.setState(current => ({
+          nodes: current.nodes.map(node => {
+            const saved = savedById.get(node.id);
+            if (!saved) return node;
+            return {
+              ...node,
+              position: { x: saved.x, y: saved.y },
+              style: { ...node.style, width: saved.width, height: saved.height },
+            };
+          }),
+          pinnedRestore: null,
+        }));
+        setViewport(restore.viewport, { duration: 0 });
+      }
+    }
+    previousPinnedIdRef.current = state.pinnedNodeId;
+    if (!state.pinnedNodeId) return;
+    const node = state.nodes.find(item => item.id === state.pinnedNodeId);
+    if (!node) return;
+    if (!useStore.getState().pinnedRestore) {
+      useStore.setState({
+        pinnedRestore: {
+          nodes: state.nodes.map(item => {
+            const size = canvasNodeSize(item);
+            return { id: item.id, x: item.position.x, y: item.position.y, width: size.width, height: size.height };
+          }),
+          viewport: getViewport(),
+        },
+      });
+    }
+    applyPinnedDock();
+  }, [pinnedNodeId, applyPinnedDock, getViewport, setViewport]);
+
+  useEffect(() => {
+    applyPinnedDock();
+  }, [pinnedPanelWidth, applyPinnedDock]);
+
+  useEffect(() => {
+    const onResize = () => applyPinnedDock();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [applyPinnedDock]);
 
   useEffect(() => {
     if (!connectionMenu) return;
@@ -1487,6 +1176,7 @@ function Canvas({ onMessage }: { onMessage: (message: string) => void }) {
         <Background variant={BackgroundVariant.Dots} gap={24} size={1.5} />
         <MiniMap position="bottom-right" pannable zoomable />
       </ReactFlow>
+      <PinnedPanel />
       {pdfDropActive && (
         <div className="pdf-drop-overlay" aria-hidden="true">
           <div><strong>松开以添加 PDF 或图片</strong><span>文件保存在本机，PDF 可选字，图片可整图提问</span></div>
@@ -1514,7 +1204,7 @@ function Canvas({ onMessage }: { onMessage: (message: string) => void }) {
             type="button"
             role="menuitem"
             onClick={() => {
-              useStore.getState().addNode(connectionMenu.flowPosition, connectionMenu.sourceId, 'point', connectionMenu.sourceHandle);
+              useStore.getState().addNode(connectionMenu.flowPosition, connectionMenu.sourceId, connectionMenu.sourceHandle);
               setConnectionMenu(null);
             }}
           ><DockIcon name="plus" />追问</button>
@@ -2065,6 +1755,7 @@ function Workspace({ onHome }: { onHome: () => void }) {
   const session = useStore(state => state.session);
   const nodes = useStore(state => state.nodes);
   const edges = useStore(state => state.edges);
+  const pinnedNodeId = useStore(state => state.pinnedNodeId);
   const loadProviders = useStore(state => state.loadProviders);
   const webSearchEnabled = useStore(state => state.webSearchEnabled);
   const setWebSearchEnabled = useStore(state => state.setWebSearchEnabled);
@@ -2111,7 +1802,20 @@ function Workspace({ onHome }: { onHome: () => void }) {
 
   const persistSession = useCallback(() => {
     const current = useStore.getState();
-    saveSessionSnapshot(exportSessionSnapshot(current.session, current.nodes, current.edges));
+    let nodes = current.nodes;
+    if (current.pinnedNodeId && current.pinnedRestore) {
+      const saved = current.pinnedRestore.nodes.find(item => item.id === current.pinnedNodeId);
+      if (saved) {
+        const pinnedNodeId = current.pinnedNodeId;
+        nodes = nodes.map(node => node.id === pinnedNodeId ? {
+          ...node,
+          position: { x: saved.x, y: saved.y },
+          style: { ...node.style, width: saved.width, height: saved.height },
+          measured: { width: saved.width, height: saved.height },
+        } : node);
+      }
+    }
+    saveSessionSnapshot(exportSessionSnapshot(current.session, nodes, current.edges));
   }, []);
   const saveWasBlocked = useRef(false);
 
@@ -2213,10 +1917,11 @@ function Workspace({ onHome }: { onHome: () => void }) {
     const canvas = document.querySelector<HTMLElement>('.canvas-wrap');
     if (!canvas) return;
     const bounds = canvas.getBoundingClientRect();
+    // 视口中心就近放置：findFreePosition 会按实际尺寸在附近找空位，避免跳到全图底部。
     useStore.getState().addNode(screenToFlowPosition({
       x: bounds.left + bounds.width / 2,
       y: bounds.top + bounds.height / 2,
-    }), null, 'stack');
+    }));
   }
 
   function toggleNodeMenu() {
@@ -2244,21 +1949,25 @@ function Workspace({ onHome }: { onHome: () => void }) {
       ? edges.find(edge => edge.source === id && nodes.find(item => item.id === edge.target)?.data.role === 'assistant')
       : null;
     const targetId = answer?.target ?? id;
-    if (!visibleLayoutGraph(nodes, edges).nodes.some(item => item.id === targetId)) return;
+    if (!visibleLayoutGraph(nodes, edges, pinnedNodeId).nodes.some(item => item.id === targetId)) return;
     fitView({ nodes: [{ id: targetId }], padding: 0.5, duration: 260, maxZoom: 1.15 });
   }
 
   function fitCanvas() {
-    const layoutNodes = visibleLayoutGraph(nodes, edges).nodes;
-    fitView({ nodes: layoutNodes.map(node => ({ id: node.id })), padding: 0.12, duration: 220 });
+    const layoutNodes = visibleLayoutGraph(nodes, edges, pinnedNodeId).nodes;
+    const targetNodes = pinnedNodeId ? layoutNodes.filter(node => node.id !== pinnedNodeId) : layoutNodes;
+    if (!targetNodes.length) return;
+    fitView({ nodes: targetNodes.map(node => ({ id: node.id })), padding: 0.12, duration: 220 });
   }
 
   function arrangeLayout() {
-    const layoutGraph = visibleLayoutGraph(nodes, edges);
-    const selected = layoutGraph.nodes.filter(node => node.selected);
+    const layoutGraph = visibleLayoutGraph(nodes, edges, pinnedNodeId);
+    const graphNodes = pinnedNodeId ? layoutGraph.nodes.filter(node => node.id !== pinnedNodeId) : layoutGraph.nodes;
+    const graphEdges = pinnedNodeId ? layoutGraph.edges.filter(edge => edge.source !== pinnedNodeId && edge.target !== pinnedNodeId) : layoutGraph.edges;
+    const selected = graphNodes.filter(node => node.selected);
     if (selected.length >= 2) {
       const ids = new Set(selected.map(node => node.id));
-      const subEdges = layoutGraph.edges.filter(edge => ids.has(edge.source) && ids.has(edge.target));
+      const subEdges = graphEdges.filter(edge => ids.has(edge.source) && ids.has(edge.target));
       const tidied = tidyLayout(selected, subEdges);
       const byId = new Map(tidied.map(node => [node.id, node]));
       const minX = Math.min(...selected.map(node => node.position.x));
@@ -2284,11 +1993,11 @@ function Workspace({ onHome }: { onHome: () => void }) {
       }));
       return;
     }
-    if (layoutGraph.nodes.length < 2) {
+    if (graphNodes.length < 2) {
       fitCanvas();
       return;
     }
-    const tidied = tidyLayout(layoutGraph.nodes, layoutGraph.edges);
+    const tidied = tidyLayout(graphNodes, graphEdges);
     const byId = new Map(tidied.map(node => [node.id, node]));
     useStore.setState({
       nodes: nodes.map(node => {
@@ -2297,7 +2006,7 @@ function Workspace({ onHome }: { onHome: () => void }) {
       }),
     });
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      fitView({ nodes: layoutGraph.nodes.map(node => ({ id: node.id })), padding: 0.12, duration: 320 });
+      fitView({ nodes: graphNodes.map(node => ({ id: node.id })), padding: 0.12, duration: 320 });
     }));
   }
 

@@ -29,7 +29,7 @@ function recordValue(value: unknown, key: string): unknown {
 
 /**
  * 解析单次生成输出：优先 {html, explanation} JSON 对象；兼容裸 HTML。
- * 解析失败/截断/超限属于确定的生成输出错误，返回具体原因供唯一一次修复使用。
+ * 解析失败、截断或超限属于确定的协议错误，由调用方明确报告。
  */
 export function parseInteractiveGenerationOutput(
   rawOutput: string,
@@ -74,16 +74,6 @@ export function parseInteractiveGenerationOutput(
   }
   return { ok: true, html, explanation };
 }
-
-export const GENERATION_OUTPUT_SCHEMA: Record<string, unknown> = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['html', 'explanation'],
-  properties: {
-    html: { type: 'string', minLength: 1 },
-    explanation: { type: 'string' },
-  },
-};
 
 /**
  * 宽松修补：JSON 字符串字面量内的真实控制字符（换行/回车/制表符）转义。

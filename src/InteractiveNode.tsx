@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
 import MarkdownContent from './Markdown.tsx';
 import { buildInteractiveDocument } from './interactive-runtime.ts';
+import type { InteractiveScopedCheckSummary } from './interactive-verification.ts';
 import { INTERACTIVE_MESSAGE_TYPES } from './interactive-protocol.ts';
 import NodeResizeCorners from './NodeResizeCorners.tsx';
 import NodeCard from './NodeCard.tsx';
@@ -41,10 +42,23 @@ function failureDescription(data: ConversationNodeData): string {
   return '可查看右侧来源说明后重试，或导出诊断获取详细信息。';
 }
 
+function ScopedCheckView({ title, check }: { title: string; check?: InteractiveScopedCheckSummary }) {
+  if (!check) return null;
+  const status = check.status === 'supported' ? '支持' : check.status === 'contradicted' ? '发现矛盾' : check.status === 'not_applicable' ? '不适用' : '无法确认';
+  return (
+    <div className="interactive-verification-check">
+      <strong>{title} · {status}</strong>
+      <span>{check.summary}</span>
+      {check.observationIds.length > 0 && <small>页面证据：{check.observationIds.join('、')}</small>}
+      {check.relationshipIds.length > 0 && <small>关系：{check.relationshipIds.join('、')}</small>}
+    </div>
+  );
+}
+
 const GENERATION_PHASE_LABEL: Record<string, { title: string; detail: string }> = {
-  generation: { title: '正在生成交互内容…', detail: '一次生成页面与知识点说明' },
+  generation: { title: '正在制作交互内容…', detail: 'agent 正在制作页面与知识说明' },
+  experiment: { title: '正在自查交互效果…', detail: '在真实浏览器中操作并核对截图与语义一致性' },
   check: { title: '正在检查运行状态…', detail: '确认页面能加载、首屏有可见内容且没有脚本错误' },
-  repair: { title: '正在修复…', detail: '根据确定的运行错误重新生成完整页面，完成后会再次检查' },
 };
 
 export default function InteractiveNode({ id, data, selected }: NodeProps<ConversationNode>) {
@@ -109,23 +123,6 @@ export default function InteractiveNode({ id, data, selected }: NodeProps<Conver
 
   function syncSplitRatio(width: number, height: number) {
     setSplitRatio(interactiveSplitFromSize(width, height, topInsetRef.current));
-  }
-
-  function applySplitRatio(value: number) {
-    const nextRatio = Math.min(0.75, Math.max(0.35, value));
-    setSplitRatio(nextRatio);
-    const node = useStore.getState().nodes.find(item => item.id === id);
-    if (!node) return;
-    const width = node.measured?.width ?? styleDimension(node.style?.width) ?? DEFAULT_INTERACTIVE_SIZE.width;
-    const next = interactiveNodeSize(width, nextRatio, topInsetRef.current);
-    if (next.width === Math.round(width) && next.height === Math.round(node.measured?.height ?? styleDimension(node.style?.height) ?? 0)) return;
-    useStore.getState().onNodesChange([{
-      id,
-      type: 'dimensions',
-      resizing: false,
-      setAttributes: true,
-      dimensions: next,
-    }]);
   }
 
   function notifyFrameResize() {
@@ -200,33 +197,6 @@ export default function InteractiveNode({ id, data, selected }: NodeProps<Conver
       pending = null;
     };
   }, [data.content]);
-
-  function startSplit(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const element = event.currentTarget;
-    const container = element.parentElement;
-    if (!container) return;
-    const rect = container.getBoundingClientRect();
-    const update = (moveEvent: PointerEvent) => {
-      if (!rect.width) return;
-      applySplitRatio((moveEvent.clientX - rect.left) / rect.width);
-    };
-    const finish = () => {
-      element.removeEventListener('pointermove', update);
-      element.removeEventListener('pointerup', finish);
-      element.removeEventListener('pointercancel', finish);
-      element.removeEventListener('lostpointercapture', finish);
-      if (element.hasPointerCapture(event.pointerId)) element.releasePointerCapture(event.pointerId);
-    };
-    element.setPointerCapture(event.pointerId);
-    element.addEventListener('pointermove', update);
-    element.addEventListener('pointerup', finish);
-    element.addEventListener('pointercancel', finish);
-    element.addEventListener('lostpointercapture', finish);
-    update(event.nativeEvent);
-  }
 
   return (
     <>
@@ -320,23 +290,6 @@ export default function InteractiveNode({ id, data, selected }: NodeProps<Conver
                 <div className="interactive-status"><span>暂无交互内容</span></div>
               )}
             </section>
-            <div
-              className="interactive-divider nodrag nowheel nopan"
-              role="separator"
-              aria-label="调整交互与说明面板宽度"
-              aria-orientation="vertical"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(splitRatio * 100)}
-              tabIndex={0}
-              onPointerDown={startSplit}
-              onKeyDown={event => {
-                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-                event.preventDefault();
-                const offset = event.key === 'ArrowLeft' ? -0.02 : 0.02;
-                applySplitRatio(splitRatio + offset);
-              }}
-            ><span className="interactive-divider-handle" /></div>
             <aside className="interactive-explanation nodrag nowheel">
               <div className="interactive-explanation-head">知识点说明</div>
               <div className="interactive-explanation-content nowheel">
@@ -344,6 +297,43 @@ export default function InteractiveNode({ id, data, selected }: NodeProps<Conver
                   ? <MarkdownContent content={data.explanation} />
                   : <span className={`interactive-explanation-empty${data.pending ? ' is-pending' : ''}`}>{data.pending ? '正在生成知识点说明…' : '暂无知识点说明'}</span>}
               </div>
+              {data.verificationSummary && (
+                <details className="interactive-verification">
+                  <summary>验证记录 · {data.verificationSummary.unverified.length ? `${data.verificationSummary.unverified.length} 项未确认` : 'Agent 已自查这些状态'}</summary>
+                  <div className="interactive-verification-body">
+                    <p>Agent 已自查这些状态；这不是独立审核或正确性保证。</p>
+                    <div className="interactive-verification-check">
+                      <strong>视觉自查 · {data.verificationSummary.visualCheck.status === 'completed' ? '已检查' : data.verificationSummary.visualCheck.status === 'inconclusive' ? '无法确认' : '未执行'}</strong>
+                      <span>{data.verificationSummary.visualCheck.summary}</span>
+                      {data.verificationSummary.visualCheck.imageEvidence && <small>附真实页面截图证据</small>}
+                    </div>
+                    <ScopedCheckView title="语义自查" check={{
+                      status: data.verificationSummary.semanticCheck.status,
+                      summary: data.verificationSummary.semanticCheck.summary,
+                      observationIds: data.verificationSummary.semanticCheck.observationIds,
+                      requirementIds: [],
+                      entityIds: [],
+                      relationshipIds: [],
+                      representationIds: [],
+                    }} />
+                    {data.verificationSummary.controlDiff && (
+                      <div className="interactive-verification-check">
+                        <strong>程序差分 · {data.verificationSummary.controlDiff.changed.length}/{data.verificationSummary.controlDiff.compared} 个控件有响应</strong>
+                        {data.verificationSummary.controlDiff.readings.length > 0 && (
+                          <ul>{data.verificationSummary.controlDiff.readings.map(reading => <li key={reading.id}>{reading.id}：{reading.before} → {reading.after}</li>)}</ul>
+                        )}
+                        {data.verificationSummary.controlDiff.unchanged.length > 0 && <small>未见变化：{data.verificationSummary.controlDiff.unchanged.join('、')}</small>}
+                      </div>
+                    )}
+                    {data.verificationSummary.unverified.length > 0 && (
+                      <div className="interactive-verification-check">
+                        <strong>未确认范围</strong>
+                        <ul>{data.verificationSummary.unverified.map(item => <li key={item}>{item}</li>)}</ul>
+                      </div>
+                    )}
+                  </div>
+                </details>
+              )}
             </aside>
           </div>
         </NodeCard>

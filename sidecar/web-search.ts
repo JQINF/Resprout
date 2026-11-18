@@ -46,6 +46,8 @@ export const SEARCH_TOOLS: Tool[] = [
   },
 ];
 
+export const WEB_SEARCH_TOOLS: Tool[] = SEARCH_TOOLS.filter(tool => tool.name === 'web_search');
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
