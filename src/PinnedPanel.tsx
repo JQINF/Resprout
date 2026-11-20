@@ -10,6 +10,7 @@ import { buildQuoteSelection, QuoteHighlight, QuotePopup, useQuoteHighlights } f
 import type { QuoteSelection } from './quote.tsx';
 import { CHAIN_COLORS, chainColorIndex } from './chain-colors.ts';
 import { canCreateFollowupFrom } from './session.ts';
+import type { GenerationRunKind } from './session.ts';
 import { formatNodeTime } from './node-utils.ts';
 import { useStore } from './store.ts';
 
@@ -63,6 +64,7 @@ export default function PinnedPanel() {
   const unpinNode = useStore(state => state.unpinNode);
   const askFromSelection = useStore(state => state.askFromSelection);
   const generateInteractiveFromSelection = useStore(state => state.generateInteractiveFromSelection);
+  const addMultiModelFromSelection = useStore(state => state.addMultiModelFromSelection);
   const edges = useStore(state => state.edges);
   const { getViewport, screenToFlowPosition } = useReactFlow();
   const panelRef = useRef<HTMLElement>(null);
@@ -141,6 +143,18 @@ export default function PinnedPanel() {
       textStart: quoteButton.textStart,
       anchor: quoteButton.anchor,
     });
+    setQuoteButton(null);
+  }
+
+  function generateSelectionMulti(kind: GenerationRunKind) {
+    if (!quoteButton || !node) return;
+    addMultiModelFromSelection({
+      sourceId: node.id,
+      quote: quoteButton.sourceText,
+      highlightQuote: quoteButton.text,
+      textStart: quoteButton.textStart,
+      anchor: quoteButton.anchor,
+    }, kind);
     setQuoteButton(null);
   }
 
@@ -253,6 +267,7 @@ export default function PinnedPanel() {
           sourceText={quoteButton.sourceText}
           onSubmit={submitQuestion}
           onGenerateInteractive={generateSelectionInteractive}
+          onGenerateMulti={generateSelectionMulti}
           onCopy={copySelection}
         />,
         document.body,

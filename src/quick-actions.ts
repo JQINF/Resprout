@@ -68,6 +68,10 @@ export function buildQuickActionPrompt(action: QuickAction | null | undefined, s
   return formatQuickAction(template, sourceText);
 }
 
+export function buildQuickActionPreset(action: QuickAction, sourceText?: string): { label: string; prompt: string } {
+  return { label: action.label, prompt: buildQuickActionPrompt(action, sourceText) };
+}
+
 export function normalizeSavedQuickActionPrompt(prompt: string | null | undefined, quote?: string | null): string | null | undefined {
   if (typeof prompt !== 'string' || !prompt.startsWith(LEGACY_QUICK_ACTION_PREFIX)) return prompt;
   const task = prompt.slice(LEGACY_QUICK_ACTION_PREFIX.length).trim();

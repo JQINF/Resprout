@@ -41,13 +41,14 @@ import { DiagnosticBundleStore } from './interactive-diagnostics.ts';
 import { checkInteractiveReadiness } from './interactive-runtime.ts';
 import { assessLegacyCard } from './interactive-validation.ts';
 import type { TechnicalStatus } from './interactive-validation.ts';
-import { canCreateFollowupFrom, createSession, DEFAULT_ANSWER_SIZE, DEFAULT_INTERACTIVE_SIZE, exportSessionSnapshot } from './session.ts';
+import { canCreateFollowupFrom, createSession, DEFAULT_ANSWER_SIZE, DEFAULT_INTERACTIVE_SIZE, DEFAULT_MULTI_INTERACTIVE_SIZE, DEFAULT_MULTI_MODEL_SIZE, exportSessionSnapshot, multiModelGenerationKind } from './session.ts';
 import type {
   Anchor,
   ConversationEdge,
   ConversationNode,
   ConversationNodeData,
   EdgeKind,
+  GenerationRunKind,
   Highlight,
   HighlightKind,
   ModelInput,
@@ -59,7 +60,7 @@ import type {
   SessionSnapshot,
   Usage,
 } from './session.ts';
-import { findFreePosition } from './node-placement.ts';
+import { findFreePosition, makeRoomForChild, makeRoomForMultiChildren, makeRoomForPosition } from './node-placement.ts';
 import { deletePdfFile, savePdfFile } from './pdf-store.ts';
 import { saveSessionSnapshot } from './session-library.ts';
 
@@ -71,7 +72,7 @@ export type ProviderInfo = PublicProvider;
 export type SearchSource = NonNullable<SearchConfig['source']>;
 export type { ProviderState, SaveProviderInput, SaveSearchConfigInput, SearchConfig } from './api.ts';
 
-export type GenerationRunKind = 'answer' | 'interactive';
+export type { GenerationRunKind } from './session.ts';
 
 export interface GenerationRun {
   sessionId: string;
@@ -96,6 +97,8 @@ export interface AskFromSelectionInput {
   question: string;
   prompt?: string | null;
   interactive?: boolean;
+  multi?: boolean;
+  multiKind?: GenerationRunKind;
   reuseHighlightId?: string | null;
   imageAssetId?: string | null;
   highlightMeta?: HighlightMetadata | null;
@@ -116,6 +119,15 @@ export interface InteractiveSelection {
   anchor?: Anchor | null;
   highlightId?: string | null;
   kind?: EdgeKind;
+}
+
+interface GenerationModelOptions {
+  model?: ModelSelection;
+  position?: XYPosition;
+}
+
+interface SendMessageOptions extends GenerationModelOptions {
+  keepSourcePending?: boolean;
 }
 
 export interface ResproutStore {
@@ -146,19 +158,24 @@ export interface ResproutStore {
   deleteProvider(id: string): Promise<void>;
   activateProvider(input: ModelSelection): Promise<void>;
   addNode(center: XYPosition, sourceId?: string | null, sourceHandle?: string | null): void;
+  addMultiModelNode(center: XYPosition, sourceId?: string | null, sourceHandle?: string | null, kind?: GenerationRunKind): void;
   addPdf(file: File, center: XYPosition): Promise<string>;
   addImage(file: File, center: XYPosition): Promise<string>;
   updateNodeContent(id: string, content: string): void;
+  applyNodePreset(id: string, label: string, prompt: string): void;
   setNodeModel(id: string, model: ModelSelection | null): void;
+  setNodeModels(id: string, models: ModelSelection[]): void;
   askFromSelection(input: AskFromSelectionInput): string;
   updateHighlightAnchor(sourceId: string, highlightId: string, anchor: Anchor | null): void;
+  addMultiModelFromSelection(input: GenerateInteractiveSelectionInput, kind?: GenerationRunKind): string;
   generateInteractiveFromSelection(input: GenerateInteractiveSelectionInput): Promise<void>;
-  generateInteractive(sourceId: string, flowPosition: XYPosition, existingId?: string | null, selection?: InteractiveSelection | null): Promise<void>;
+  generateInteractive(sourceId: string, flowPosition: XYPosition, existingId?: string | null, selection?: InteractiveSelection | null, options?: GenerationModelOptions): Promise<void>;
   generateInteractiveFromRequest(id: string): Promise<void>;
   regenerateInteractive(id: string): Promise<void>;
   cancelInteractiveGeneration(id: string): void;
   exportInteractiveDiagnostic(id: string): { json: string; filename: string; bytes: number; truncated: boolean } | null;
-  sendMessage(id: string): Promise<void>;
+  generateMulti(id: string): Promise<void>;
+  sendMessage(id: string, options?: SendMessageOptions): Promise<void>;
   onNodesChange(changes: NodeChange<ConversationNode>[]): void;
   onEdgesChange(changes: EdgeChange<ConversationEdge>[]): void;
   onConnect(connection: Connection): void;
@@ -188,6 +205,14 @@ function interactiveErrorStage(error: unknown): InteractiveStage {
 
 function numericStyleDimension(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function placementOccupants(nodes: ConversationNode[], edges: ConversationEdge[]): ConversationNode[] {
+  const nodeById = new Map(nodes.map(node => [node.id, node]));
+  const collapsed = new Set(edges
+    .filter(edge => nodeById.get(edge.source)?.data.nodeType === 'question' && nodeById.get(edge.target)?.data.role === 'assistant')
+    .map(edge => edge.source));
+  return nodes.filter(node => !collapsed.has(node.id));
 }
 
 function loadWebSearchEnabled(): boolean {
@@ -437,6 +462,46 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     requestAnimationFrame(() => adjust(0));
   },
 
+  addMultiModelNode(center, sourceId = null, sourceHandle = null, kind: GenerationRunKind = 'answer') {
+    if (sourceId && !canCreateFollowupFrom(get().nodes.find(node => node.id === sourceId))) return;
+    const id = crypto.randomUUID();
+    set(state => {
+      const defaultSize = kind === 'interactive' ? DEFAULT_MULTI_INTERACTIVE_SIZE : DEFAULT_MULTI_MODEL_SIZE;
+      const size = { w: defaultSize.width, h: defaultSize.height };
+      const position = findFreePosition({ x: center.x - size.w / 2, y: center.y - size.h / 2 }, size, state.nodes);
+      const source = sourceId ? state.nodes.find(node => node.id === sourceId) ?? null : null;
+      const initialModel = source?.data.model ?? state.activeProvider;
+      const models = initialModel ? [initialModel] : [];
+      const data: ConversationNodeData = {
+        nodeType: 'multi',
+        role: 'user',
+        content: '',
+        model: models[0] ?? null,
+        models,
+        generationKind: kind,
+        pending: false,
+        error: '',
+        createdAt: Date.now(),
+      };
+      const nodes: ConversationNode[] = [...state.nodes, {
+        id,
+        type: 'multi',
+        position,
+        style: { width: size.w, height: size.h },
+        data,
+      }];
+      const edges: ConversationEdge[] = sourceId ? [...state.edges, {
+        id: crypto.randomUUID(),
+        source: sourceId,
+        target: id,
+        type: 'thinking',
+        ...(sourceHandle ? { sourceHandle } : {}),
+        data: { kind: 'derive', thinking: '', streaming: false, error: '', quote: '', anchor: null, highlightId: null },
+      }] : state.edges;
+      return { nodes, edges };
+    });
+  },
+
   async addPdf(file, center) {
     if (!file || (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name))) throw new Error('请选择 PDF 文件');
     if (file.size > 100 * 1024 * 1024) throw new Error('PDF 文件不能超过 100 MB');
@@ -516,9 +581,30 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     }));
   },
 
+  applyNodePreset(id, label, prompt) {
+    set(state => ({
+      nodes: state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, content: label, prompt } } : node),
+    }));
+  },
+
   setNodeModel(id, model) {
     set(state => ({
       nodes: state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, model } } : node),
+    }));
+  },
+
+  setNodeModels(id, models) {
+    const seen = new Set<string>();
+    const selected = models.filter(model => {
+      const key = `${model.providerId}::${model.modelId}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    set(state => ({
+      nodes: state.nodes.map((node): ConversationNode => node.id === id
+        ? { ...node, data: { ...node.data, models: selected, model: selected[0] ?? null } }
+        : node),
     }));
   },
 
@@ -532,6 +618,8 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       question,
       prompt = null,
       interactive = false,
+      multi = false,
+      multiKind = 'answer',
       reuseHighlightId = null,
       imageAssetId = null,
       highlightMeta = null,
@@ -543,53 +631,53 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       if (!source) return state;
       const reuseHighlight = Boolean(source.data.highlights?.some(highlight => highlight.id === reuseHighlightId));
       const highlightId = reuseHighlight && reuseHighlightId ? reuseHighlightId : crypto.randomUUID();
-      const sourceWidth = source.measured?.width ?? numericStyleDimension(source.style?.width, 300);
-      const probeChildren = state.edges
-        .filter(edge => edge.source === sourceId && edge.data?.kind === 'probe')
-        .flatMap(edge => {
-          const node = state.nodes.find(item => item.id === edge.target);
-          return node ? [node] : [];
-        });
-      const lastProbe = probeChildren[probeChildren.length - 1];
-      const desiredPosition: XYPosition = preferredPosition ?? (lastProbe
-        ? (() => {
-            const lastHeight = lastProbe.measured?.height ?? numericStyleDimension(lastProbe.style?.height, 140);
-            return { x: lastProbe.position.x, y: lastProbe.position.y + lastHeight + 40 };
-          })()
-        : {
-            x: source.position.x + sourceWidth + 56,
-            y: source.position.y + Math.max(0, (anchor?.y ?? 0) - 70),
-          });
-      const position = findFreePosition(desiredPosition, { w: 300, h: 140 }, state.nodes);
+      const multiSize = multiKind === 'interactive' ? DEFAULT_MULTI_INTERACTIVE_SIZE : DEFAULT_MULTI_MODEL_SIZE;
+      const size = multi
+        ? { w: multiSize.width, h: multiSize.height }
+        : { w: 300, h: 140 };
+      const initialModel = source.data.model ?? state.activeProvider;
+      const models = multi && initialModel ? [initialModel] : [];
+      const occupants = placementOccupants(state.nodes, state.edges);
+      const placement = preferredPosition
+        ? makeRoomForPosition(preferredPosition, size, occupants)
+        : makeRoomForChild(source, size, occupants, anchor?.y ?? 0);
+      const position = placement.position;
       const questionNode: ConversationNode = {
         id: questionId,
-        type: 'conversation',
+        type: multi ? 'multi' : 'conversation',
         position,
+        ...(multi ? { style: { width: size.w, height: size.h } } : {}),
         data: {
-          nodeType: interactive ? 'interactive' : 'question',
+          nodeType: multi ? 'multi' : interactive ? 'interactive' : 'question',
           role: 'user',
           content: question ?? '',
           prompt,
-          model: source.data.model ?? null,
+          model: multi ? models[0] ?? null : source.data.model ?? null,
+          models: multi ? models : undefined,
+          generationKind: multi ? multiKind : undefined,
           imageAssetId,
           pending: false,
           error: '',
-          autoFocus: interactive || !question,
+          autoFocus: multi || interactive || !question,
           createdAt: Date.now(),
         },
       };
       const nodes = state.nodes
-        .map((node): ConversationNode => node.id === sourceId
-          ? {
-              ...node,
-              data: {
-                ...node.data,
-                highlights: reuseHighlight
-                  ? node.data.highlights
-                  : [...(node.data.highlights ?? []), { id: highlightId, quote: highlightQuote ?? quote, textStart, ...(highlightMeta ?? {}) }],
-              },
-            }
-          : node)
+        .map((node): ConversationNode => {
+          const relocated = placement.relocations.get(node.id);
+          const positioned = relocated ? { ...node, position: relocated } : node;
+          return node.id === sourceId
+            ? {
+                ...positioned,
+                data: {
+                  ...positioned.data,
+                  highlights: reuseHighlight
+                    ? positioned.data.highlights
+                    : [...(positioned.data.highlights ?? []), { id: highlightId, quote: highlightQuote ?? quote, textStart, ...(highlightMeta ?? {}) }],
+                },
+              }
+            : positioned;
+        })
         .concat(questionNode);
       const edges: ConversationEdge[] = [...state.edges, {
         id: crypto.randomUUID(),
@@ -600,7 +688,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       }];
       return { nodes, edges };
     });
-    if (question && !interactive) void get().sendMessage(questionId);
+    if (question && !interactive && !multi) void get().sendMessage(questionId);
     return questionId;
   },
 
@@ -622,6 +710,10 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       });
       return changed ? { nodes } : state;
     });
+  },
+
+  addMultiModelFromSelection(input, kind = 'answer') {
+    return get().askFromSelection({ ...input, question: '', multi: true, multiKind: kind });
   },
 
   async generateInteractiveFromSelection(input) {
@@ -660,7 +752,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     await get().generateInteractive(sourceId, flowPosition, null, { quote, anchor, highlightId, kind: 'probe' });
   },
 
-  async generateInteractive(sourceId, flowPosition, existingId = null, selection = null) {
+  async generateInteractive(sourceId, flowPosition, existingId = null, selection = null, options: GenerationModelOptions = {}) {
     const current = get();
     const sessionId = current.session.id;
     const source = current.nodes.find(node => node.id === sourceId);
@@ -669,11 +761,11 @@ export const useStore = create<ResproutStore>()((set, get) => ({
 
     const id = existing?.id ?? crypto.randomUUID();
     const size = { w: DEFAULT_INTERACTIVE_SIZE.width, h: DEFAULT_INTERACTIVE_SIZE.height };
-    const position = existing ? existing.position : findFreePosition({
+    const position = existing ? existing.position : options.position ?? findFreePosition({
       x: flowPosition.x - size.w / 2,
       y: flowPosition.y - size.h / 2,
     }, size, current.nodes);
-    const selectedModel = existing?.data.model ?? source.data.model ?? current.activeProvider;
+    const selectedModel = existing?.data.model ?? options.model ?? source.data.model ?? current.activeProvider;
     const existingSourceEdge = existing ? current.edges.find(edge => edge.target === existing.id) : null;
     const selectedText = String(selection?.quote || existingSourceEdge?.data?.quote || '').trim();
     const topic = String(selectedText || existing?.data.title || source.data.title || source.data.content || '').replace(/\s+/g, ' ').trim().slice(0, 36);
@@ -1014,19 +1106,73 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     };
   },
 
-  async sendMessage(id) {
+  async generateMulti(id) {
+    const current = get();
+    const source = current.nodes.find(node => node.id === id && node.data.nodeType === 'multi');
+    if (!source || source.data.pending) return;
+    const kind = multiModelGenerationKind(source.data);
+    if (kind === 'answer' && !source.data.content.trim()) return;
+    const selected = source.data.models ?? (source.data.model ? [source.data.model] : []);
+    const models = selected.filter(model => current.providers.some(provider =>
+      provider.id === model.providerId && provider.modelIds.includes(model.modelId)));
+    if (!models.length) {
+      set(state => ({
+        nodes: state.nodes.map((node): ConversationNode => node.id === id
+          ? { ...node, data: { ...node.data, error: '请至少选择一个可用模型' } }
+          : node),
+      }));
+      return;
+    }
+
+    const size = kind === 'answer' ? DEFAULT_ANSWER_SIZE : DEFAULT_INTERACTIVE_SIZE;
+    const placement = makeRoomForMultiChildren(
+      source,
+      { w: size.width, h: size.height },
+      models.length,
+      current.nodes,
+    );
+    const sessionId = current.session.id;
+    updateGenerationSession(sessionId, state => ({
+      ...state,
+      nodes: state.nodes.map((node): ConversationNode => {
+        const relocated = placement.relocations.get(node.id);
+        const positioned = relocated ? { ...node, position: relocated } : node;
+        return node.id === id
+          ? { ...positioned, data: { ...positioned.data, pending: true, error: '' } }
+          : positioned;
+      }),
+    }));
+    try {
+      await Promise.allSettled(models.map((model, index) => {
+        const position = placement.positions[index]!;
+        if (kind === 'answer') return get().sendMessage(id, { model, position, keepSourcePending: true });
+        return get().generateInteractive(id, {
+          x: position.x + size.width / 2,
+          y: position.y + size.height / 2,
+        }, null, null, { model, position });
+      }));
+    } finally {
+      updateGenerationSession(sessionId, state => ({
+        ...state,
+        nodes: state.nodes.map((node): ConversationNode => node.id === id
+          ? { ...node, data: { ...node.data, pending: false } }
+          : node),
+      }));
+    }
+  },
+
+  async sendMessage(id, options: SendMessageOptions = {}) {
     const source = get().nodes.find(node => node.id === id);
-    if (!source || source.data.role === 'assistant' || source.data.pending || !source.data.content.trim()) return;
+    if (!source || source.data.role === 'assistant' || (source.data.pending && !options.keepSourcePending) || !source.data.content.trim()) return;
 
     const current = get();
     const sessionId = current.session.id;
-    const answerOffset = current.edges.filter(edge => edge.source === id).reduce((offset, edge) => {
-      const answer = current.nodes.find(node => node.id === edge.target);
-      if (answer?.data.role !== 'assistant') return offset;
-      return offset + (answer.measured?.height ?? numericStyleDimension(answer.style?.height, DEFAULT_ANSWER_SIZE.height)) + 64;
-    }, 0);
-    const sourceWidth = source.measured?.width ?? numericStyleDimension(source.style?.width, 300);
-    const selectedModel = source.data.model ?? current.activeProvider;
+    const answerSize = { w: DEFAULT_ANSWER_SIZE.width, h: DEFAULT_ANSWER_SIZE.height };
+    const placement = options.position
+      ? { position: options.position, relocations: new Map<string, XYPosition>() }
+      : makeRoomForChild(source, answerSize, placementOccupants(current.nodes, current.edges));
+    const position = placement.position;
+    const selectedModel = options.model ?? source.data.model ?? current.activeProvider;
     const answerId = crypto.randomUUID();
     const edgeId = crypto.randomUUID();
     const selectedProvider = selectedModel
@@ -1043,10 +1189,16 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       .trim();
     set(state => {
       const data: ConversationNodeData = { nodeType: 'chat', role: 'assistant', content: '', model: selectedModel, pending: true, error: '', createdAt: Date.now() };
-      const nodes: ConversationNode[] = state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, pending: true, error: '' } } : node).concat({
+      const nodes: ConversationNode[] = state.nodes.map((node): ConversationNode => {
+        const relocated = placement.relocations.get(node.id);
+        const positioned = relocated ? { ...node, position: relocated } : node;
+        return node.id === id
+          ? { ...positioned, data: { ...positioned.data, pending: true, error: '' } }
+          : positioned;
+      }).concat({
         id: answerId,
         type: 'conversation',
-        position: { x: source.position.x + sourceWidth + 56, y: source.position.y + answerOffset },
+        position,
         style: { ...DEFAULT_ANSWER_SIZE },
         data,
       });
@@ -1158,7 +1310,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
       flushDeltas();
       updateGenerationSession(sessionId, state => ({
         ...state,
-        nodes: state.nodes.map((node): ConversationNode => node.id === id || node.id === answerId
+        nodes: state.nodes.map((node): ConversationNode => node.id === answerId || (node.id === id && !options.keepSourcePending)
           ? { ...node, data: { ...node.data, pending: false } }
           : node),
         edges: state.edges.map((edge): ConversationEdge => edge.id === edgeId

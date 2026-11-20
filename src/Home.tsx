@@ -50,12 +50,10 @@ export default function SessionHome({ onNew, onOpen }: SessionHomeProps) {
 
   return (
     <div className="session-home">
-      <header className="home-header">
-        <img className="home-logo" src={resproutLogo} alt="Resprout" />
-      </header>
       <main className="home-main">
         <section className="history-section">
           <div className="home-actions">
+            <img className="home-logo" src={resproutLogo} alt="Resprout" />
             <button type="button" className="new-session-button" onClick={onNew}>新建会话</button>
           </div>
           <div className="history-heading">

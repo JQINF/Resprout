@@ -12,6 +12,9 @@ export interface NodeSize {
 }
 
 export const DEFAULT_ANSWER_SIZE: NodeSize = { width: 720, height: 480 };
+export const NODE_VERTICAL_GAP = 48;
+export const DEFAULT_MULTI_MODEL_SIZE: NodeSize = { width: 260, height: 220 };
+export const DEFAULT_MULTI_INTERACTIVE_SIZE: NodeSize = { width: 260, height: 150 };
 /**
  * 3:2 指左侧生成内容 iframe 的实际 CSS 内容视口宽高比，
  * 不包含右侧知识说明、分隔条、卡片边框与宿主状态条。
@@ -172,10 +175,11 @@ export interface Highlight {
 }
 
 export type NodeRole = 'user' | 'assistant' | 'interactive' | 'reference';
-export type NodeType = 'root' | 'question' | 'chat' | 'interactive' | 'reference';
-export type CanvasNodeType = 'conversation' | 'interactive' | 'pdf' | 'image';
+export type NodeType = 'root' | 'question' | 'chat' | 'interactive' | 'reference' | 'multi';
+export type CanvasNodeType = 'conversation' | 'interactive' | 'pdf' | 'image' | 'multi';
 export type AssetKind = 'pdf' | 'image';
 export type ModelInput = 'text' | 'image';
+export type GenerationRunKind = 'answer' | 'interactive';
 
 export interface ModelSelection {
   providerId: string;
@@ -223,6 +227,8 @@ export type ConversationNodeData = {
   role: NodeRole;
   content: string;
   model: ModelSelection | null;
+  models?: ModelSelection[];
+  generationKind?: GenerationRunKind;
   pending: boolean;
   error: string;
   createdAt: number;
@@ -268,6 +274,10 @@ export type ConversationEdgeData = {
 
 export type ConversationNode = Node<ConversationNodeData, CanvasNodeType>;
 export type ConversationEdge = Edge<ConversationEdgeData, 'thinking'> & { data: ConversationEdgeData };
+
+export function multiModelGenerationKind(data: Pick<ConversationNodeData, 'content' | 'generationKind'>): GenerationRunKind {
+  return data.generationKind ?? (data.content.trim() ? 'answer' : 'interactive');
+}
 
 export function canCreateFollowupFrom(node: ConversationNode | null | undefined): boolean {
   if (!node || node.data.pending) return false;
@@ -319,7 +329,12 @@ function isEdgeKind(value: unknown): value is EdgeKind {
 }
 
 function restoredNodeType(value: unknown): NodeType {
-  return value === 'root' || value === 'question' || value === 'chat' || value === 'interactive' ? value : 'chat';
+  return value === 'root' || value === 'question' || value === 'chat' || value === 'interactive' || value === 'multi' ? value : 'chat';
+}
+
+function restoredModelSelections(value: unknown): ModelSelection[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isModelSelection);
 }
 
 export function exportSessionSnapshot(session: Session, nodes: ConversationNode[], edges: ConversationEdge[]) {
@@ -360,6 +375,8 @@ export function exportSessionSnapshot(session: Session, nodes: ConversationNode[
         explanation: node.data.explanation ?? '',
         prompt: node.data.prompt ?? null,
         model: node.data.model ?? null,
+        models: node.data.models ?? [],
+        ...(node.data.nodeType === 'multi' ? { generationKind: multiModelGenerationKind(node.data) } : {}),
         usage: node.data.usage ?? null,
         position: node.position,
         width: node.measured?.width ?? numericDimension(node.style?.width, 300),
@@ -447,6 +464,13 @@ export function importSession(text: string): SessionSnapshot {
       const role: NodeRole = node.role === 'interactive' ? 'interactive' : node.role === 'assistant' ? 'assistant' : node.role === 'reference' ? 'reference' : 'user';
       const interactive = role === 'interactive';
       const reference = role === 'reference';
+      const multi = role === 'user' && node.type === 'multi';
+      const content = String(node.content ?? '');
+      const generationKind: GenerationRunKind | undefined = multi
+        ? node.generationKind === 'answer' || node.generationKind === 'interactive'
+          ? node.generationKind
+          : content.trim() ? 'answer' : 'interactive'
+        : undefined;
       const summary = typeof node.summary === 'string' ? node.summary : '';
       const status = node.status === 'fallback' || node.status === 'failed' || node.status === 'interrupted' || node.status === 'unverified'
         ? node.status
@@ -466,12 +490,12 @@ export function importSession(text: string): SessionSnapshot {
       const verificationSummary = sanitizeInteractiveVerificationSummary(node.verificationSummary);
       return {
         id: imported.id,
-        type: interactive ? 'interactive' : reference ? (node.assetKind === 'image' ? 'image' : 'pdf') : 'conversation',
+        type: interactive ? 'interactive' : reference ? (node.assetKind === 'image' ? 'image' : 'pdf') : multi ? 'multi' : 'conversation',
         position: imported.position,
-        style: role === 'assistant' || interactive || reference
+        style: role === 'assistant' || interactive || reference || multi
           ? {
-              width: isFiniteNumber(node.width) ? Math.max(interactive ? 320 : reference ? 360 : 220, node.width) : reference ? 600 : interactive ? DEFAULT_INTERACTIVE_SIZE.width : DEFAULT_ANSWER_SIZE.width,
-              height: isFiniteNumber(node.height) ? Math.max(interactive ? 240 : reference ? 320 : 150, node.height) : reference ? 680 : interactive ? DEFAULT_INTERACTIVE_SIZE.height : DEFAULT_ANSWER_SIZE.height,
+              width: isFiniteNumber(node.width) ? Math.max(interactive ? 320 : reference ? 360 : multi ? 260 : 220, node.width) : reference ? 600 : interactive ? DEFAULT_INTERACTIVE_SIZE.width : multi ? DEFAULT_MULTI_MODEL_SIZE.width : DEFAULT_ANSWER_SIZE.width,
+              height: isFiniteNumber(node.height) ? Math.max(interactive ? 240 : reference ? 320 : 150, node.height) : reference ? 680 : interactive ? DEFAULT_INTERACTIVE_SIZE.height : multi ? (generationKind === 'interactive' ? DEFAULT_MULTI_INTERACTIVE_SIZE.height : DEFAULT_MULTI_MODEL_SIZE.height) : DEFAULT_ANSWER_SIZE.height,
             }
           : undefined,
         data: {
@@ -486,10 +510,12 @@ export function importSession(text: string): SessionSnapshot {
           pageCount: reference && isFiniteNumber(node.pageCount) ? node.pageCount : 0,
           contextText: reference ? String(node.contextText ?? '') : undefined,
           contextTruncated: reference ? Boolean(node.contextTruncated) : false,
-          content: String(node.content ?? ''),
+          content,
           explanation: typeof node.explanation === 'string' ? node.explanation : '',
           prompt: typeof node.prompt === 'string' ? node.prompt : null,
           model: isModelSelection(node.model) ? node.model : null,
+          models: multi ? restoredModelSelections(node.models) : undefined,
+          generationKind,
           usage: isUsage(node.usage) ? node.usage : null,
           pending: false,
           phase: undefined,

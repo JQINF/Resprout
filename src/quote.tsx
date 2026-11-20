@@ -6,7 +6,7 @@ import { clusterLineRects, textRangeRects, normalizedRangeStart } from './text-s
 import type { RectLike } from './text-selection.ts';
 import { buildQuickActionPrompt, saveQuickActions } from './quick-actions.ts';
 import type { QuickAction } from './quick-actions.ts';
-import type { Anchor, Highlight } from './session.ts';
+import type { Anchor, GenerationRunKind, Highlight } from './session.ts';
 import { useStore } from './store.ts';
 
 export type RectBox = RectLike;
@@ -371,11 +371,12 @@ type QuotePopupProps = {
   sourceText: string;
   onSubmit(question: string, prompt?: string | null): void;
   onGenerateInteractive(): void;
+  onGenerateMulti(kind: GenerationRunKind): void;
   onCopy(): void | Promise<void>;
   copyLabel?: string;
 };
 
-export function QuotePopup({ style, className, sourceText, onSubmit, onGenerateInteractive, onCopy, copyLabel = '复制文本' }: QuotePopupProps) {
+export function QuotePopup({ style, className, sourceText, onSubmit, onGenerateInteractive, onGenerateMulti, onCopy, copyLabel = '复制文本' }: QuotePopupProps) {
   const quickActions = useStore(state => state.quickActions);
   const setQuickActions = useStore(state => state.setQuickActions);
   const [inputValue, setInputValue] = useState('');
@@ -444,6 +445,18 @@ export function QuotePopup({ style, className, sourceText, onSubmit, onGenerateI
             title="将选中内容生成互动解释"
             onClick={onGenerateInteractive}
           ><PinlessInteractiveIcon />生成交互</button>
+          <button
+            type="button"
+            className="quote-action"
+            title="使用多个模型回答选中内容"
+            onClick={() => onGenerateMulti('answer')}
+          >多模型回答</button>
+          <button
+            type="button"
+            className="quote-action"
+            title="使用多个模型生成选中内容的交互解释"
+            onClick={() => onGenerateMulti('interactive')}
+          >多模型交互</button>
           <button
             type="button"
             className="quote-action"

@@ -202,7 +202,7 @@ export default function InteractiveNode({ id, data, selected }: NodeProps<Conver
     <>
       <div className={`conversation-node assistant interactive-node ${selected ? 'selected' : ''} ${resizing ? 'is-resizing' : ''}`}>
         <Handle type="target" position={Position.Left} />
-        <div className="node-kind">交互解释</div>
+        <div className="node-kind">交互解释{data.model?.modelId ? ` · ${data.model.modelId}` : ''}</div>
         <button
           type="button"
           className="interactive-regenerate nodrag"
