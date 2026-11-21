@@ -2,7 +2,7 @@
  * 交互页面与宿主之间的共享运行协议。
  *
  * 宿主与注入 iframe 的运行时脚本共用这里的消息类型、协议版本和身份字段。
- * 运行时脚本由 `interactive-runtime-script.js` 通过 `?raw` 注入，其中的
+ * 运行时脚本由 `interactive-runtime-script.ts` 经转译后通过 `?raw` 注入，其中的
  * 常量占位符由 `serializeInteractiveProtocol()` 生成，避免复制字符串后拼错。
  */
 

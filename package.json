@@ -7,7 +7,7 @@
   "author": "Resprout contributors",
   "publishConfig": {
     "access": "public",
-    "tag": "alpha"
+    "tag": "latest"
   },
   "keywords": [
     "divergent-learning",

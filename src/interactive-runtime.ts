@@ -2,7 +2,7 @@
  * 交互 HTML 的构建与真实浏览器检查驱动。
  *
  * - `buildInteractiveDocument` 供展示节点、readiness 检查 iframe 和离线验收 iframe 共用；
- *   注入脚本来自 `interactive-runtime-script.js`，协议常量由共享模块序列化。
+ *   注入脚本来自 `interactive-runtime-script.ts`，经 Vite 转译后注入，协议常量由共享模块序列化。
  * - `checkInteractiveReadiness` 是生产路径的轻量运行检查：单候选单 iframe，只确认
  *   页面能加载、首屏有可见主体、观察窗口内没有确定运行异常；不遍历控件、不执行
  *   契约、不扫描多视口、不做任何模型调用。ready 不证明所有交互或教学内容正确。
@@ -11,7 +11,7 @@
  *   无进展超时、终态唯一、取消与清理，并把每次验收的问题和累计证据结构化返回。
  */
 
-import runtimeSource from './interactive-runtime-script.js?raw';
+import runtimeSource from './interactive-runtime-script.ts?raw';
 import designCss from './interactive-design.css?raw';
 import { extractInteractiveContract, MAX_CONTRACT_CASES } from './interactive-contract.ts';
 import type { InteractiveContract, InteractiveContractCase } from './interactive-contract.ts';

@@ -341,12 +341,14 @@ export default function PDFViewer({ id, fileName, fileId, highlights, anchorRef 
   const viewerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pagesRef = useRef<HTMLDivElement>(null);
+  const relinkInputRef = useRef<HTMLInputElement>(null);
   const imageDragRef = useRef<ImageDrag | null>(null);
   const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null);
   const [pageSize, setPageSize] = useState<PageSize | null>(null);
   const [availableWidth, setAvailableWidth] = useState(576);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
   const [selection, setSelection] = useState<PdfSelection | null>(null);
   const [preview, setPreview] = useState<PdfPreview | null>(null);
   const [question, setQuestion] = useState('');
@@ -375,7 +377,7 @@ export default function PDFViewer({ id, fileName, fileId, highlights, anchorRef 
     async function load(): Promise<void> {
       try {
         const record = await readPdfFile(fileId ?? '');
-        if (!record) throw new Error('没有找到 PDF 原件。JSON 备份不包含 PDF 文件，请重新拖入。');
+        if (!record) throw new Error(`没有找到 PDF《${fileName}》原件，请重新关联附件。`);
         const bytes = await record.blob.arrayBuffer();
         const task = getDocument({ data: bytes });
         loadingTask = task;
@@ -411,7 +413,7 @@ export default function PDFViewer({ id, fileName, fileId, highlights, anchorRef 
       active = false;
       void loadingTask?.destroy();
     };
-  }, [fileId, id]);
+  }, [fileId, id, reloadKey, fileName]);
 
   useEffect(() => {
     if (!selection) return;
@@ -660,6 +662,20 @@ export default function PDFViewer({ id, fileName, fileId, highlights, anchorRef 
   }
   const previewColor = chainColorAt(edges.filter(edge => edge.source === id && edge.data?.kind === 'probe').length);
 
+  async function relinkPdf(file: File | undefined): Promise<void> {
+    if (!file || !fileId) return;
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+      setError('请选择 PDF 文件');
+      return;
+    }
+    try {
+      await savePdfFile(fileId, file);
+      setReloadKey(value => value + 1);
+    } catch (cause) {
+      setError(`附件保存失败：${errorMessage(cause, '未知错误')}`);
+    }
+  }
+
   return (
     <div ref={viewerRef} className="pdf-viewer">
       <header className="pdf-header">
@@ -668,11 +684,23 @@ export default function PDFViewer({ id, fileName, fileId, highlights, anchorRef 
           <strong>{fileName}</strong>
         </div>
       </header>
+      <input
+        ref={relinkInputRef}
+        hidden
+        type="file"
+        accept=".pdf,application/pdf"
+        onChange={event => {
+          void relinkPdf(event.target.files?.[0]);
+          event.target.value = '';
+        }}
+      />
       <div ref={scrollRef} className="pdf-page-scroll nodrag nowheel" onScroll={() => { if (selection || imageDragRef.current) finishSelection(); }}>
         {(loading || error) && (
           <div className="pdf-status">
             {loading ? '正在读取 PDF…' : error}
-            {!loading && error && <button type="button" onClick={() => window.location.reload()}>重新加载</button>}
+            {!loading && error && (error.includes('没有找到 PDF')
+              ? <button type="button" onClick={() => relinkInputRef.current?.click()}>重新关联附件</button>
+              : <button type="button" onClick={() => window.location.reload()}>重新加载</button>)}
           </div>
         )}
         {pdfDocument && pageSize && (

@@ -69,9 +69,13 @@ export function normalizeMathSyntax(content: string): string {
 }
 
 export function normalizeMathSource(value: string): string {
-  return value.trim()
-    .replace(/([_^])([A-Za-z0-9]+)/g, '$1{$2}')
-    .replace(/~/g, '\\sim ');
+  let normalized = value.trim().replace(/([_^])(\d+|[A-Za-z])/g, '$1{$2}');
+  let previous = '';
+  do {
+    previous = normalized;
+    normalized = normalized.replace(/([_^])\{([^{}]+)\}\1\{(\d+|[A-Za-z])\}/g, '$1{$2$3}');
+  } while (normalized !== previous);
+  return normalized.replace(/~/g, '\\sim ');
 }
 
 export function normalizeMarkdown(content: string): string {

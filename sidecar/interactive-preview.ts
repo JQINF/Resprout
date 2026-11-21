@@ -12,6 +12,18 @@ function waitDuration(value: string): number {
   return duration;
 }
 
+async function readRuntimeSource(): Promise<string> {
+  try {
+    const source = await readFile(new URL('../src/interactive-runtime-script.ts', import.meta.url), 'utf8');
+    const { transformWithOxc } = await import('vite');
+    const filename = new URL('../src/interactive-runtime-script.ts', import.meta.url).pathname;
+    return (await transformWithOxc(source, filename, { lang: 'ts' })).code;
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'ENOENT') throw error;
+  }
+  return readFile(new URL('../src/interactive-runtime-script.js', import.meta.url), 'utf8');
+}
+
 /** No shell, filesystem or arbitrary CDP commands are exposed to the model. */
 export async function createInteractivePreview(signal: AbortSignal) {
   const browser = await launchBrowser();
@@ -51,7 +63,7 @@ export async function createInteractivePreview(signal: AbortSignal) {
     connection.on('Runtime.executionContextDestroyed', (event, session) => contexts.delete(`${session}:${event.executionContextId}`));
     connection.on('Runtime.executionContextsCleared', (_event, session) => { for (const [key, ctx] of contexts) if (ctx.session === session) contexts.delete(key); });
     const [runtime, css] = await Promise.all([
-      readFile(new URL('../src/interactive-runtime-script.js', import.meta.url), 'utf8'),
+      readRuntimeSource(),
       readFile(new URL('../src/interactive-design.css', import.meta.url), 'utf8'),
     ]);
     let contextId: number | undefined;

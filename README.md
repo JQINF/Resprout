@@ -45,13 +45,13 @@ Resprout 使用你配置的模型供应商与 API Key，不需要 Resprout 账�
 无需安装，直接运行：
 
 ```bash
-npx --yes resprout@alpha
+npx --yes resprout
 ```
 
 或者全局安装命令：
 
 ```bash
-npm install -g resprout@alpha
+npm install -g resprout
 resprout
 ```
 

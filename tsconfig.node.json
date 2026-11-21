@@ -3,6 +3,7 @@
   "compilerOptions": {
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "moduleDetection": "legacy",
     "types": ["node"],
     "rootDir": ".",
     "outDir": "dist/node",
@@ -12,5 +13,5 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["bin/**/*.ts", "sidecar/**/*.ts"]
+  "include": ["bin/**/*.ts", "sidecar/**/*.ts", "src/interactive-runtime-script.ts"]
 }

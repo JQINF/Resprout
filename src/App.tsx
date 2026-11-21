@@ -31,6 +31,7 @@ import ProviderSettings from './Settings.tsx';
 import SessionHome from './Home.tsx';
 import MultiModelNode from './MultiModelNode.tsx';
 import NodeResizeCorners from './NodeResizeCorners.tsx';
+import SelectionFrame from './SelectionFrame.tsx';
 import NodeCard from './NodeCard.tsx';
 import ImageNode from './ImageNode.tsx';
 import Select from './Select.tsx';
@@ -47,12 +48,13 @@ import {
   DEFAULT_INTERACTIVE_SIZE,
   DEFAULT_MULTI_INTERACTIVE_SIZE,
   DEFAULT_MULTI_MODEL_SIZE,
-  exportSession,
+  NODE_VERTICAL_GAP,
   exportSessionSnapshot,
   importSession,
   multiModelGenerationKind,
 } from './session.ts';
-import { readSessionRecord, saveSessionSnapshot } from './session-library.ts';
+import { hasSessionRecord, readSessionRecord, saveSessionSnapshot } from './session-library.ts';
+import { exportSessionBackup, importSessionBackup } from './session-backup.ts';
 import { buildBranchTrees, plainPreview } from './branch-manager.ts';
 import type { BranchMainlineItem, BranchSideItem, BranchTree } from './branch-manager.ts';
 import { readPdfFile } from './pdf-store.ts';
@@ -439,7 +441,7 @@ function ConversationNode({ id, data, selected, checkpoint = false }: Conversati
     const source = state.nodes.find(node => node.id === parent.source);
     if (!current || !source) return;
     const currentSize = canvasNodeSize(current);
-    const belowTopLeft = { x: current.position.x, y: current.position.y + currentSize.height + 40 };
+    const belowTopLeft = { x: current.position.x, y: current.position.y + currentSize.height + NODE_VERTICAL_GAP };
     if (incomingProbe) {
       const highlight = source.data.highlights?.find(item => item.id === incomingProbe.data.highlightId);
       const questionId = askFromSelection({
@@ -880,14 +882,15 @@ function Canvas({ onMessage }: { onMessage: (message: string) => void }) {
   const dragDepthRef = useRef(0);
   const [marquee, setMarquee] = useState<MarqueeBox | null>(null);
   const [panning, setPanning] = useState(false);
+  const [selectionGesture, setSelectionGesture] = useState(false);
   const [pdfDropActive, setPdfDropActive] = useState(false);
-  const pointerGestureActive = nodeDragging || panning || Boolean(marquee);
+  const pointerGestureActive = nodeDragging || panning || selectionGesture || Boolean(marquee);
 
   useEffect(() => {
     const host = canvasHostRef.current;
     if (!host) return;
     const blocked = (target: EventTarget | null) => closestElement(target,
-      'input, textarea, select, [contenteditable="true"], .nopan, .react-flow__handle, .react-flow__resize-control, .react-flow__minimap, .react-flow__controls',
+      'input, textarea, select, [contenteditable="true"], .nopan, .selection-frame, .react-flow__handle, .react-flow__resize-control, .react-flow__minimap, .react-flow__controls',
     );
     const applyMarquee = (state: MarqueeState) => {
       if (Math.hypot(state.current.x - state.start.x, state.current.y - state.start.y) < 5) return;
@@ -1215,6 +1218,7 @@ function Canvas({ onMessage }: { onMessage: (message: string) => void }) {
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1.5} />
         <MiniMap position="bottom-right" pannable zoomable />
+        <SelectionFrame nodes={flowNodes} getSize={canvasNodeSize} onGestureChange={setSelectionGesture} />
       </ReactFlow>
       <PinnedPanel />
       {pdfDropActive && (
@@ -1661,7 +1665,7 @@ function Workspace({ onHome }: { onHome: () => void }) {
     }
   }
 
-  const persistSession = useCallback(() => {
+  const persistSession = useCallback(async () => {
     const current = useStore.getState();
     let nodes = current.nodes;
     if (current.pinnedNodeId && current.pinnedRestore) {
@@ -1676,7 +1680,8 @@ function Workspace({ onHome }: { onHome: () => void }) {
         } : node);
       }
     }
-    saveSessionSnapshot(exportSessionSnapshot(current.session, nodes, current.edges));
+    if (!nodes.length && !await hasSessionRecord(current.session.id)) return;
+    await saveSessionSnapshot(exportSessionSnapshot(current.session, nodes, current.edges));
   }, []);
   const saveWasBlocked = useRef(false);
 
@@ -1684,24 +1689,26 @@ function Workspace({ onHome }: { onHome: () => void }) {
     const blocked = nodes.some(node => node.dragging || node.data.pending);
     const wasBlocked = saveWasBlocked.current;
     saveWasBlocked.current = blocked;
-    if (!nodes.length || blocked) return;
+    if (blocked) return;
     const timeout = setTimeout(() => {
-      try {
-        persistSession();
-      } catch (error) {
+      void persistSession().catch(error => {
         setMessage(`自动保存失败：${errorMessage(error)}`);
-      }
+      });
     }, wasBlocked ? 0 : 800);
     return () => clearTimeout(timeout);
   }, [session, nodes, edges, persistSession]);
 
   useEffect(() => {
     const flush = () => {
-      if (!useStore.getState().nodes.length) return;
-      try { persistSession(); } catch {}
+      void persistSession().catch(() => {});
     };
+    const flushWhenHidden = () => { if (document.visibilityState === 'hidden') flush(); };
     window.addEventListener('pagehide', flush);
-    return () => window.removeEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', flushWhenHidden);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', flushWhenHidden);
+    };
   }, [persistSession]);
 
   useEffect(() => {
@@ -1761,15 +1768,12 @@ function Workspace({ onHome }: { onHome: () => void }) {
     });
   }
 
-  function goHome() {
-    const current = useStore.getState();
-    if (current.nodes.length) {
-      try {
-        persistSession();
-      } catch (error) {
-        setMessage(`保存失败，尚未返回主页：${errorMessage(error)}`);
-        return;
-      }
+  async function goHome() {
+    try {
+      await persistSession();
+    } catch (error) {
+      setMessage(`保存失败，尚未返回主页：${errorMessage(error)}`);
+      return;
     }
     onHome();
   }
@@ -1778,7 +1782,7 @@ function Workspace({ onHome }: { onHome: () => void }) {
     const canvas = document.querySelector<HTMLElement>('.canvas-wrap');
     if (!canvas) return;
     const bounds = canvas.getBoundingClientRect();
-    // 视口中心就近放置：findFreePosition 会按实际尺寸在附近找空位，避免跳到全图底部。
+    // 视口中心就近放置：按实际尺寸推开重叠节点，避免跳到全图底部。
     useStore.getState().addNode(screenToFlowPosition({
       x: bounds.left + bounds.width / 2,
       y: bounds.top + bounds.height / 2,
@@ -1871,23 +1875,30 @@ function Workspace({ onHome }: { onHome: () => void }) {
     }));
   }
 
-  function save() {
-    const json = exportSession(useStore.getState().session, nodes, edges);
-    const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${useStore.getState().session.title}.resprout.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setMessage(`已备份 ${nodes.length} 个节点`);
+  async function save() {
+    try {
+      const json = await exportSessionBackup(useStore.getState().session, nodes, edges);
+      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${useStore.getState().session.title}.resprout.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setMessage(`已备份 ${nodes.length} 个节点及其附件`);
+    } catch (error) {
+      setMessage(`备份失败：${errorMessage(error)}`);
+    }
   }
 
   async function open(file: File | undefined) {
     if (!file) return;
     try {
+      const restored = await importSessionBackup(await file.text());
       cacheCurrentSession();
-      useStore.getState().loadSession(importSession(await file.text()));
-      setMessage(`已从 ${file.name} 恢复`);
+      useStore.getState().loadSession(restored.snapshot);
+      setMessage(restored.missingAssets.length
+        ? `已从 ${file.name} 恢复；缺少附件：${restored.missingAssets.join('、')}，请在资料卡片上重新关联`
+        : `已从 ${file.name} 恢复，附件已恢复`);
     } catch (error) {
       setMessage(`恢复失败：${errorMessage(error)}`);
     } finally {
@@ -1951,7 +1962,7 @@ function Workspace({ onHome }: { onHome: () => void }) {
           aria-expanded={Boolean(backupMenu)}
           onClick={toggleBackupMenu}
         ><DockIcon name="backup" /><span className="dock-label">备份</span></button>
-        <button type="button" onClick={goHome} aria-label="会话主页" title="会话主页"><DockIcon name="home" /><span className="dock-label">主页</span></button>
+        <button type="button" onClick={() => void goHome()} aria-label="会话主页" title="会话主页"><DockIcon name="home" /><span className="dock-label">主页</span></button>
         <button type="button" onClick={() => setSettingsOpen(true)} aria-label="模型设置" title="模型设置"><DockIcon name="settings" /><span className="dock-label">设置</span></button>
         <input ref={fileInput} hidden type="file" accept=".json,application/json" onChange={event => {
           const file = event.target.files?.[0];
@@ -1975,7 +1986,7 @@ function Workspace({ onHome }: { onHome: () => void }) {
       {backupMenu && createPortal(
         <div className="popover" style={{ left: backupMenu.left, bottom: backupMenu.bottom, width: 176 }}>
           <div className="backup-menu" role="menu" aria-label="会话备份与恢复">
-          <button type="button" role="menuitem" autoFocus onClick={() => { setBackupMenu(null); save(); }}>备份到 JSON</button>
+          <button type="button" role="menuitem" autoFocus onClick={() => { setBackupMenu(null); void save(); }}>备份到 JSON</button>
           <button type="button" role="menuitem" onClick={() => { setBackupMenu(null); fileInput.current?.click(); }}>从 JSON 恢复</button>
           </div>
           <span className="popover-arrow" style={{ left: backupMenu.arrowLeft }} aria-hidden="true" />
@@ -2026,9 +2037,10 @@ export default function App() {
     setPage('workspace');
   }
 
-  function openSession(id: string) {
+  async function openSession(id: string) {
     cacheCurrentSession();
-    useStore.getState().loadSession(cachedSession(id) ?? importSession(readSessionRecord(id)));
+    const snapshot = cachedSession(id) ?? importSession(await readSessionRecord(id));
+    useStore.getState().loadSession(snapshot);
     setPage('workspace');
   }
 

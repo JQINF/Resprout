@@ -121,7 +121,7 @@ export function makeRoomForPosition(
   const maxCascadeSteps = Math.max(32, nodes.length * 4);
   for (let index = 0; index < queue.length; index += 1) {
     if (index >= maxCascadeSteps) {
-      return { position: findFreePosition(rounded, size, nodes), relocations: new Map<string, XYPosition>() };
+      return { position: rounded, relocations: new Map<string, XYPosition>() };
     }
     const area = queue[index];
     if (!area) continue;
@@ -155,7 +155,7 @@ export function makeRoomForMultiChildren(
     x: Math.round(sourceBounds.x + sourceBounds.w + 56),
     y: Math.round(sourceBounds.y + sourceBounds.h / 2 - groupHeight / 2),
   };
-  const { relocations } = makeRoomForPosition(groupOrigin, { w: size.w, h: groupHeight }, nodes);
+  const { relocations } = makeRoomForPosition(groupOrigin, { w: size.w, h: groupHeight }, nodes.filter(node => node.id !== source.id));
   return {
     positions: Array.from({ length: count }, (_, index) => ({
       x: groupOrigin.x,
@@ -171,5 +171,5 @@ export function makeRoomForChild(
   nodes: readonly IdentifiedPlacementNode[],
   anchorY = 0,
 ): ChildPlacement {
-  return makeRoomForPosition(childDesiredPosition(source, size, anchorY), size, nodes);
+  return makeRoomForPosition(childDesiredPosition(source, size, anchorY), size, nodes.filter(node => node.id !== source.id));
 }

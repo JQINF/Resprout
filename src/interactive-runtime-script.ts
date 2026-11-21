@@ -1,33 +1,115 @@
+declare const __RESPROUT_PROTOCOL__: {
+  version: number;
+  message: Record<string, string>;
+  issue: Record<string, string>;
+  inconclusiveCodes: string[];
+  testConfigElementId: string;
+  testContractElementId: string;
+};
+
 (function () {
   'use strict';
 
+  type AnyValue = any;
+  type RuntimeConfig = Record<string, AnyValue>;
+  type FormControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement;
+
+  interface EvidenceStep {
+    control: string;
+    action: string;
+    before: string;
+    after: string;
+    text: string;
+    changed: boolean;
+    domChanged: boolean;
+    visualChanged: boolean | null;
+    waitedMs: number;
+    issueCode: string;
+  }
+
+  type ActiveAction = Pick<EvidenceStep, 'control' | 'action' | 'before' | 'after' | 'text'>;
+
+  interface Issue {
+    code: string;
+    origin: string;
+    severity: string;
+    message: string;
+    evidence: string;
+    step: number | null;
+  }
+
+  interface ErrorInfo {
+    message: string;
+    diagnostics: string;
+  }
+
+  interface Color {
+    r: number;
+    g: number;
+    b: number;
+    a: number;
+  }
+
+  interface ControlInfo {
+    index: number;
+    tag: string;
+    type: string;
+    label: string;
+    visualControl: boolean;
+  }
+
+  interface RuntimeEvidence {
+    phase: string;
+    initialText: string;
+    steps: EvidenceStep[];
+    totalSteps: number;
+    diagnostics: string;
+    inventory: ControlInfo[];
+  }
+
+  interface PlotApi {
+    ctx: CanvasRenderingContext2D;
+    width: number;
+    height: number;
+    dpr: number;
+    canvas: HTMLCanvasElement;
+  }
+
+  interface PlotObserver {
+    invalidate: () => void;
+    redraw: () => void;
+    state: { width: number; height: number; dpr: number };
+    dispose: () => void;
+  }
+
+  var HOST = window as unknown as Record<string, AnyValue>;
   var PROTOCOL = __RESPROUT_PROTOCOL__;
   var MSG = PROTOCOL.message;
   var ISSUE = PROTOCOL.issue;
-  var INCONCLUSIVE = {};
+  var INCONCLUSIVE: Record<string, boolean> = {};
   for (var inconclusiveIndex = 0; inconclusiveIndex < PROTOCOL.inconclusiveCodes.length; inconclusiveIndex += 1) {
     INCONCLUSIVE[PROTOCOL.inconclusiveCodes[inconclusiveIndex]] = true;
   }
   var MAX_EVIDENCE_STEPS = 12;
   var MAX_INVENTORY = 24;
 
-  function hasOwn(object, key) {
+  function hasOwn(object: object, key: PropertyKey): boolean {
     return Object.prototype.hasOwnProperty.call(object, key);
   }
 
-  function now() {
+  function now(): number {
     return Date.now();
   }
 
-  function delay(ms) {
-    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  function delay(ms: number): Promise<void> {
+    return new Promise<void>(function (resolve) { setTimeout(resolve, ms); });
   }
 
-  function readConfig() {
+  function readConfig(): RuntimeConfig | null {
     try {
       var element = document.getElementById(PROTOCOL.testConfigElementId);
       if (!element) return null;
-      var value = JSON.parse(element.textContent || 'null');
+      var value = JSON.parse(element.textContent || 'null') as RuntimeConfig | null;
       if (!value || typeof value !== 'object' || value.mode === 'display') return null;
       return value;
     } catch (error) {
@@ -35,7 +117,7 @@
     }
   }
 
-  var CONFIG = readConfig();
+  var CONFIG = readConfig() as RuntimeConfig;
   var TESTING = Boolean(CONFIG);
 
   // 离屏验收 iframe 不保证产生原生帧；页面常用 requestAnimationFrame 做首屏绘制。
@@ -44,19 +126,19 @@
     (function () {
       var nativeRequest = window.requestAnimationFrame.bind(window);
       var nativeCancel = window.cancelAnimationFrame.bind(window);
-      var entries = new Map();
+      var entries = new Map<number, { done: boolean; nativeId: number; timer: ReturnType<typeof setTimeout> | 0 }>();
       var nextId = 1;
-      window.requestAnimationFrame = function (callback) {
+      window.requestAnimationFrame = function (callback: FrameRequestCallback): number {
         var id = nextId;
         nextId += 1;
-        var entry = { done: false, nativeId: 0, timer: 0 };
+        var entry = { done: false, nativeId: 0, timer: 0 as ReturnType<typeof setTimeout> | 0 };
         entries.set(id, entry);
-        var finish = function (timestamp) {
+        var finish = function (timestamp: number): void {
           if (entry.done) return;
           entry.done = true;
           clearTimeout(entry.timer);
           entries.delete(id);
-          try { callback(timestamp); } catch (error) { recordError(error, error && error.message ? error.message : String(error), 0, 0); }
+          try { callback(timestamp); } catch (error) { recordError(error, error instanceof Error ? error.message : String(error), 0, 0); }
         };
         entry.timer = setTimeout(function () {
           finish(typeof performance === 'object' && performance && typeof performance.now === 'function' ? performance.now() : Date.now());
@@ -83,15 +165,15 @@
     loadTimeoutMs: 8000
   };
 
-  function createStorage() {
-    var values = new Map();
+  function createStorage(): Storage {
+    var values = new Map<string, string>();
     return {
       get length() { return values.size; },
       clear: function () { values.clear(); },
-      getItem: function (key) { return values.has(String(key)) ? values.get(String(key)) : null; },
-      key: function (index) { return Array.from(values.keys())[index] || null; },
-      removeItem: function (key) { values.delete(String(key)); },
-      setItem: function (key, value) { values.set(String(key), String(value)); }
+      getItem: function (key: string) { return values.has(String(key)) ? values.get(String(key)) ?? null : null; },
+      key: function (index: number) { return Array.from(values.keys())[index] || null; },
+      removeItem: function (key: string) { values.delete(String(key)); },
+      setItem: function (key: string, value: string) { values.set(String(key), String(value)); }
     };
   }
   for (var storageIndex = 0; storageIndex < 2; storageIndex += 1) {
@@ -99,17 +181,16 @@
     try { Object.defineProperty(window, storageName, { configurable: true, value: createStorage() }); } catch (error) {}
   }
 
-  var state = {};
+  var state: Record<string, AnyValue> = {};
   var viewport = { width: 0, height: 0 };
   var initialized = false;
   var validating = false;
   var finished = false;
-  var startedAt = 0;
   var sequence = 0;
-  var firstError = null;
-  var activeAction = null;
-  var issues = [];
-  var evidence = {
+  var firstError: ErrorInfo | null = null;
+  var activeAction: ActiveAction | null = null;
+  var issues: Issue[] = [];
+  var evidence: RuntimeEvidence = {
     phase: '准备',
     initialText: '',
     steps: [],
@@ -118,10 +199,10 @@
     inventory: []
   };
 
-  function post(type, payload) {
+  function post(type: string, payload?: Record<string, AnyValue>): void {
     if (!TESTING) return;
     sequence += 1;
-    var message = {
+    var message: Record<string, AnyValue> = {
       protocolVersion: PROTOCOL.version,
       type: type,
       runId: CONFIG.runId,
@@ -146,7 +227,7 @@
     return { steps: head.concat(tail), omitted: evidence.steps.length - MAX_EVIDENCE_STEPS };
   }
 
-  function snapshotEvidence(phase) {
+  function snapshotEvidence(phase?: string) {
     var retained = retainedSteps();
     return {
       phase: String(phase || evidence.phase || ''),
@@ -174,7 +255,7 @@
     };
   }
 
-  function progress(stage, index, total) {
+  function progress(stage: string, index: number, total: number): void {
     evidence.phase = String(stage || evidence.phase);
     post(MSG.validationProgress, {
       stage: stage,
@@ -184,7 +265,7 @@
     });
   }
 
-  function addIssue(code, origin, severity, message, detail) {
+  function addIssue(code: string, origin: string, severity: string, message: string, detail?: string): void {
     issues.push({
       code: code,
       origin: origin,
@@ -208,7 +289,7 @@
     return 'pass';
   }
 
-  function finish(summary) {
+  function finish(summary: string): void {
     if (finished) return;
     finished = true;
     validating = false;
@@ -229,7 +310,7 @@
     });
   }
 
-  function finishFailure(code, message, detail) {
+  function finishFailure(code: string, message: string, detail?: string): void {
     if (activeAction) {
       pushStep({
         control: activeAction.control,
@@ -250,7 +331,7 @@
     finish(message);
   }
 
-  function referenceExcerpt(message) {
+  function referenceExcerpt(message: string): string {
     var match = String(message).match(/([A-Za-z_$][A-Za-z0-9_$]*) is not defined/);
     if (!match) return '';
     var identifier = match[1];
@@ -271,7 +352,7 @@
     return '';
   }
 
-  function errorDiagnostics(error, message, line, column) {
+  function errorDiagnostics(error: AnyValue, message: string, line: number, column: number): string {
     var parts = [];
     if (Number(line) > 0) parts.push('错误位置：第 ' + line + ' 行，第 ' + column + ' 列');
     var stack = String(error && error.stack ? error.stack : '').trim();
@@ -281,7 +362,7 @@
     return parts.join(String.fromCharCode(10)).slice(0, 2400);
   }
 
-  function showError(message, diagnostics) {
+  function showError(message: string, diagnostics?: string): void {
     message = String(message);
     var show = function () {
       if (!document.body) return;
@@ -303,7 +384,7 @@
     if (notice) notice.remove();
   }
 
-  function recordError(error, message, line, column) {
+  function recordError(error: AnyValue, message: string, line: number, column: number): ErrorInfo {
     var text = String(message || (error && error.message) || '页面脚本运行失败');
     if (firstError) return firstError;
     firstError = {
@@ -328,7 +409,7 @@
     return firstError;
   }
 
-  function parseColor(value) {
+  function parseColor(value: string): Color | null {
     var match = String(value || '').match(/rgba?\(([^)]+)\)/i);
     if (!match) return null;
     var parts = match[1].split(/[,\s/]+/).filter(Boolean).map(Number);
@@ -336,7 +417,7 @@
     return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
   }
 
-  function mixColors(top, bottom) {
+  function mixColors(top: Color, bottom: Color): Color {
     var alpha = Math.max(0, Math.min(1, top.a));
     return {
       r: top.r * alpha + bottom.r * (1 - alpha),
@@ -346,23 +427,23 @@
     };
   }
 
-  function luminance(color) {
-    var channel = function (value) {
+  function luminance(color: Color): number {
+    var channel = function (value: number): number {
       var normalized = value / 255;
       return normalized <= 0.03928 ? normalized / 12.92 : Math.pow((normalized + 0.055) / 1.055, 2.4);
     };
     return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b);
   }
 
-  function contrastRatio(first, second) {
+  function contrastRatio(first: Color, second: Color): number {
     var a = luminance(first);
     var b = luminance(second);
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
   }
 
-  function backgroundFor(element) {
-    var layers = [];
-    var current = element;
+  function backgroundFor(element: HTMLElement): Color {
+    var layers: Color[] = [];
+    var current: HTMLElement | null = element;
     while (current) {
       var background = parseColor(getComputedStyle(current).backgroundColor);
       if (background && background.a > 0) {
@@ -376,7 +457,7 @@
 
   function ensureContrast() {
     if (validating || typeof getComputedStyle !== 'function') return;
-    document.querySelectorAll('body *:not(script):not(style):not(svg):not(canvas)').forEach(function (element) {
+    document.querySelectorAll<HTMLElement>('body *:not(script):not(style):not(svg):not(canvas)').forEach(function (element) {
       if (element.namespaceURI && element.namespaceURI.indexOf('svg') >= 0) return;
       if (!isVisible(element)) return;
       var hasText = Array.from(element.childNodes || []).some(function (node) {
@@ -398,7 +479,7 @@
     });
   }
 
-  var contrastTimer = 0;
+  var contrastTimer: ReturnType<typeof setTimeout> | 0 = 0;
 
   function scheduleContrast() {
     if (validating || contrastTimer) return;
@@ -408,8 +489,8 @@
     }, 0);
   }
 
-  function readControl(control) {
-    if (control.type === 'checkbox') return control.checked;
+  function readControl(control: FormControl): string | number | boolean {
+    if (control.type === 'checkbox') return (control as HTMLInputElement).checked;
     if (control.type === 'range' || control.type === 'number') {
       var value = Number(control.value);
       return Number.isFinite(value) ? value : 0;
@@ -418,35 +499,35 @@
   }
 
   function syncControls() {
-    document.querySelectorAll('[data-state]').forEach(function (control) {
+    document.querySelectorAll<HTMLInputElement>('[data-state]').forEach(function (control) {
       var key = control.dataset.state;
-      if (!(key in state)) return;
-      if (control.type === 'checkbox') control.checked = Boolean(state[key]);
+      if (!key || !(key in state)) return;
+      if (control.type === 'checkbox') (control as HTMLInputElement).checked = Boolean(state[key]);
       else if (control.value !== String(state[key])) control.value = String(state[key]);
     });
   }
 
   function syncText() {
-    document.querySelectorAll('[data-state-text]').forEach(function (element) {
+    document.querySelectorAll<HTMLElement>('[data-state-text]').forEach(function (element) {
       var key = element.dataset.stateText;
-      if (key in state) element.textContent = String(state[key]);
+      if (key && key in state) element.textContent = String(state[key]);
     });
   }
 
   function render() {
     if (!initialized) return;
     try {
-      if (typeof window.renderInteractive === 'function') {
-        window.renderInteractive(Object.assign({}, state), Object.assign({}, viewport));
+      if (typeof HOST.renderInteractive === 'function') {
+        HOST.renderInteractive(Object.assign({}, state), Object.assign({}, viewport));
       }
       clearError();
       scheduleContrast();
     } catch (error) {
-      recordError(error, error && error.message ? error.message : String(error), 0, 0);
+      recordError(error, error instanceof Error ? error.message : String(error), 0, 0);
     }
   }
 
-  function commit(patch) {
+  function commit(patch: Record<string, AnyValue>): boolean {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return false;
     Object.assign(state, patch);
     syncControls();
@@ -454,13 +535,13 @@
     render();
     return true;
   }
-  window.interactiveSetState = commit;
+  HOST.interactiveSetState = commit;
 
   /* === 宿主绘图辅助 API（window.rsPlot） =====================================
    * observe(canvas, draw)：画布 CSS 尺寸由布局决定，缓冲区按 DPR 管理；
    * rect/clamp/pointer：坐标、标签边距与指针映射工具。 */
 
-  function rsPlotRect(width, height, margins) {
+  function rsPlotRect(width: number, height: number, margins?: Record<string, number | undefined>) {
     var m = margins || {};
     // 边距接受 left/right/top/bottom 或 l/r/t/b 两种写法。
     var left = Math.max(0, Number(m.left ?? m.l) || 0);
@@ -486,7 +567,7 @@
     };
   }
 
-  function rsPlotClamp(value, min, max) {
+  function rsPlotClamp(value: number, min: number, max: number): number {
     var lo = Math.min(min, max);
     var hi = Math.max(min, max);
     return Math.min(hi, Math.max(lo, value));
@@ -494,7 +575,7 @@
 
   // 指针坐标以 canvas 自身 getBoundingClientRect 为基础，按显示宽高换算到
   // CSS 像素布局坐标；外部缩放（React Flow/浏览器）与 DPR 不会被重复乘入。
-  function rsPlotPointer(canvas, event) {
+  function rsPlotPointer(canvas: HTMLCanvasElement, event: { clientX: number; clientY: number }) {
     if (!canvas || !event) return null;
     var rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
@@ -506,15 +587,16 @@
     };
   }
 
-  function rsObservePlot(canvas, draw) {
+  function rsObservePlot(canvas: HTMLCanvasElement, draw: (api: PlotApi) => void): PlotObserver | null {
     if (!canvas || typeof draw !== 'function') return null;
     if (typeof canvas.getContext !== 'function') return null;
-    var ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    const ctx: CanvasRenderingContext2D = context;
     var disposed = false;
     var rafId = 0;
-    var observer = null;
-    var dprCleanup = null;
+    var observer: ResizeObserver | null = null;
+    var dprCleanup: (() => void) | null = null;
     var state = { width: 0, height: 0, dpr: 1 };
 
     function currentDpr() {
@@ -543,7 +625,7 @@
         // 契约：draw(api)，api = { ctx, width, height, dpr, canvas }，全部使用 CSS 像素。
         draw({ ctx: ctx, width: width, height: height, dpr: ratio, canvas: canvas });
       } catch (error) {
-        recordError(error, error && error.message ? error.message : String(error), 0, 0);
+        recordError(error, error instanceof Error ? error.message : String(error), 0, 0);
       }
     }
 
@@ -607,14 +689,14 @@
     };
   }
 
-  window.rsPlot = {
+  HOST.rsPlot = {
     observe: rsObservePlot,
     rect: rsPlotRect,
     clamp: rsPlotClamp,
     pointer: rsPlotPointer
   };
 
-  function canvasPixels(canvas) {
+  function canvasPixels(canvas: HTMLCanvasElement): Uint8ClampedArray | null {
     var sample = document.createElement('canvas');
     sample.width = 64;
     sample.height = 64;
@@ -624,7 +706,7 @@
     return context.getImageData(0, 0, 64, 64).data;
   }
 
-  function canvasHasDrawing(canvas) {
+  function canvasHasDrawing(canvas: HTMLCanvasElement): boolean | null {
     var bounds = canvas.getBoundingClientRect();
     if (bounds.width < 1 || bounds.height < 1 || canvas.width < 1 || canvas.height < 1) return true;
     try {
@@ -643,7 +725,7 @@
     return false;
   }
 
-  function svgHasVisibleShape(svg, contentOnly) {
+  function svgHasVisibleShape(svg: SVGSVGElement, contentOnly: boolean): boolean {
     var bounds = svg.getBoundingClientRect();
     if (bounds.width < 1 || bounds.height < 1) return true;
     var selector = 'path, line, polyline, polygon, rect, circle, ellipse, text';
@@ -654,16 +736,16 @@
     });
     return elements.some(function (element) {
       try {
-        var box = element.getBBox();
+        var box = (element as SVGGraphicsElement).getBBox();
         if (box.width <= 0 && box.height <= 0) return false;
-        var current = element;
+        var current: Element | null = element;
         while (current && current !== svg) {
           var style = getComputedStyle(current);
           if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
           current = current.parentElement;
         }
         var elementStyle = getComputedStyle(element);
-        var transparent = function (value) {
+        var transparent = function (value: string): boolean {
           return !value || value === 'none' || value === 'transparent' || /^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/.test(value);
         };
         return !(transparent(elementStyle.stroke) && transparent(elementStyle.fill));
@@ -673,7 +755,7 @@
     });
   }
 
-  function canvasSignature(canvas) {
+  function canvasSignature(canvas: HTMLCanvasElement): number {
     try {
       var pixels = canvasPixels(canvas);
       if (!pixels) return 0;
@@ -690,11 +772,11 @@
     }
   }
 
-  function visualSignature(element, root) {
-    var style = typeof getComputedStyle === 'function' ? getComputedStyle(element) : {};
+  function visualSignature(element: Element, root: Element | null) {
+    var style = typeof getComputedStyle === 'function' ? getComputedStyle(element) : {} as CSSStyleDeclaration;
     var bounds = typeof element.getBoundingClientRect === 'function' ? element.getBoundingClientRect() : null;
     var rootBounds = root && typeof root.getBoundingClientRect === 'function' ? root.getBoundingClientRect() : null;
-    var round = function (value) { return Math.round(value * 100) / 100; };
+    var round = function (value: number): number { return Math.round(value * 100) / 100; };
     var geometry = bounds ? [
       round(rootBounds ? bounds.left - rootBounds.left : 0),
       round(rootBounds ? bounds.top - rootBounds.top : 0),
@@ -714,10 +796,10 @@
   }
 
   function graphicsSnapshot() {
-    var canvases = Array.from(document.querySelectorAll('.rs-stage canvas, canvas.rs-chart')).map(function (canvas) {
+    var canvases = Array.from(document.querySelectorAll<HTMLCanvasElement>('.rs-stage canvas, canvas.rs-chart')).map(function (canvas) {
       return [canvasSignature(canvas), visualSignature(canvas, null)];
     });
-    var svgs = Array.from(document.querySelectorAll('.rs-stage svg, svg.rs-chart')).map(function (svg) {
+    var svgs = Array.from(document.querySelectorAll<SVGSVGElement>('.rs-stage svg, svg.rs-chart')).map(function (svg) {
       return [
         svg.outerHTML,
         visualSignature(svg, null),
@@ -729,8 +811,8 @@
     return JSON.stringify([canvases, svgs]);
   }
 
-  function visibleTextSnapshot(limit) {
-    var root = document.querySelector('.rs-page') || document.body;
+  function visibleTextSnapshot(limit?: number): string {
+    var root = document.querySelector<HTMLElement>('.rs-page') || document.body;
     return String(root && (root.innerText || root.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, limit || 1600);
   }
 
@@ -741,23 +823,23 @@
     ]);
   }
 
-  function elementSignature(element) {
+  function elementSignature(element: Element): string {
     if (!element) return '';
     var parts = [String(element.textContent || ''), String(element.outerHTML || '')];
-    var canvases = element.matches && element.matches('canvas') ? [element] : [];
-    canvases = canvases.concat(Array.from(element.querySelectorAll ? element.querySelectorAll('canvas') : []));
+    var canvases: HTMLCanvasElement[] = element.matches && element.matches('canvas') ? [element as HTMLCanvasElement] : [];
+    canvases = canvases.concat(Array.from(element.querySelectorAll ? element.querySelectorAll<HTMLCanvasElement>('canvas') : []));
     canvases.forEach(function (canvas) {
       parts.push('canvas:' + String(canvasSignature(canvas)) + ':' + JSON.stringify(visualSignature(canvas, null)));
     });
-    var svgs = element.matches && element.matches('svg') ? [element] : [];
-    svgs = svgs.concat(Array.from(element.querySelectorAll ? element.querySelectorAll('svg') : []));
+    var svgs: SVGSVGElement[] = element.matches && element.matches('svg') ? [element as SVGSVGElement] : [];
+    svgs = svgs.concat(Array.from(element.querySelectorAll ? element.querySelectorAll<SVGSVGElement>('svg') : []));
     svgs.forEach(function (svg) {
       parts.push('svg:' + String(svg.outerHTML || '') + ':' + JSON.stringify(visualSignature(svg, null)));
     });
-    var fields = element.matches && element.matches('input, select, textarea') ? [element] : [];
-    fields = fields.concat(Array.from(element.querySelectorAll ? element.querySelectorAll('input, select, textarea') : []));
+    var fields: FormControl[] = element.matches && element.matches('input, select, textarea') ? [element as FormControl] : [];
+    fields = fields.concat(Array.from(element.querySelectorAll ? element.querySelectorAll<FormControl>('input, select, textarea') : []));
     fields.forEach(function (field) {
-      parts.push('field:' + String(field.value == null ? '' : field.value) + ':' + (field.checked ? '1' : '0'));
+      parts.push('field:' + String(field.value == null ? '' : field.value) + ':' + ((field as HTMLInputElement).checked ? '1' : '0'));
     });
     if (typeof element.getBoundingClientRect === 'function') {
       var rect = element.getBoundingClientRect();
@@ -766,8 +848,8 @@
     return parts.join('|');
   }
 
-  function hasSubmitControl(current) {
-    var candidates = document.querySelectorAll("button, input[type='submit'], [data-action], [role='button']");
+  function hasSubmitControl(current: Element): boolean {
+    var candidates = document.querySelectorAll<HTMLButtonElement>("button, input[type='submit'], [data-action], [role='button']");
     for (var index = 0; index < candidates.length; index += 1) {
       var element = candidates[index];
       if (element === current) continue;
@@ -777,7 +859,7 @@
     return false;
   }
 
-  function isVisible(element) {
+  function isVisible(element: Element | null): boolean {
     if (!element) return false;
     if (typeof element.getBoundingClientRect !== 'function') return true;
     var bounds = element.getBoundingClientRect();
@@ -804,7 +886,7 @@
       addIssue(ISSUE.emptyContent, 'candidate', 'blocking', '页面主区域为空');
       return false;
     }
-    document.querySelectorAll('.rs-stage canvas, canvas.rs-chart').forEach(function (canvas) {
+    document.querySelectorAll<HTMLCanvasElement>('.rs-stage canvas, canvas.rs-chart').forEach(function (canvas) {
       if (!isVisible(canvas)) return;
       if (!canvas.hasAttribute('data-visual-content')) {
         addIssue(ISSUE.canvasMissingContent, 'candidate', 'blocking', '主 Canvas 缺少 data-visual-content 知识图形标记');
@@ -817,14 +899,14 @@
         addIssue(ISSUE.canvasMissingContent, 'candidate', 'blocking', '主 Canvas 没有实际绘制内容，空白画布或坐标轴不能作为核心演示');
       }
     });
-    document.querySelectorAll('.rs-stage svg, svg.rs-chart').forEach(function (svg) {
+    document.querySelectorAll<SVGSVGElement>('.rs-stage svg, svg.rs-chart').forEach(function (svg) {
       if (isVisible(svg) && !svgHasVisibleShape(svg, true)) {
         addIssue(ISSUE.svgMissingContent, 'candidate', 'blocking', '主 SVG 缺少 data-visual-content 标记的可见知识图形，坐标轴、网格和图例不算');
       }
     });
-    document.querySelectorAll('[data-state-text]').forEach(function (element) {
+    document.querySelectorAll<HTMLElement>('[data-state-text]').forEach(function (element) {
       var key = element.dataset.stateText;
-      if (!(key in state)) {
+      if (!key || !(key in state)) {
         addIssue(ISSUE.invalidOutput, 'candidate', 'blocking', '文本绑定引用了不存在的状态：' + key);
         return;
       }
@@ -846,9 +928,9 @@
     });
   }
 
-  function subjectText(root) {
-    if (!root || root.id === 'resprout-runtime-error') return '';
-    if (root.nodeType === 1 && /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(String(root.tagName))) return '';
+  function subjectText(root: Node): string {
+    if (!root || (root as Element).id === 'resprout-runtime-error') return '';
+    if (root.nodeType === 1 && /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(String((root as Element).tagName))) return '';
     var text = '';
     for (var node = root.firstChild; node; node = node.nextSibling) {
       if (node.nodeType === 3) text += node.nodeValue;
@@ -890,15 +972,15 @@
   function hasPageLogic() {
     if (pageScripts().length) return true;
     if (document.querySelector('[onclick], [onchange], [oninput], [onsubmit]')) return true;
-    return typeof window.renderInteractive === 'function' || typeof window.interactiveAction === 'function';
+    return typeof HOST.renderInteractive === 'function' || typeof HOST.interactiveAction === 'function';
   }
 
   var CONTROL_SELECTOR = "input:not([type='hidden']), select, textarea, button, [data-action], [role='button']";
 
-  function controlElements() {
-    var elements = Array.from(document.querySelectorAll(CONTROL_SELECTOR));
-    var seen = [];
-    var result = [];
+  function controlElements(): FormControl[] {
+    var elements = Array.from(document.querySelectorAll<FormControl>(CONTROL_SELECTOR));
+    var seen: FormControl[] = [];
+    var result: FormControl[] = [];
     for (var index = 0; index < elements.length; index += 1) {
       var element = elements[index];
       if (seen.indexOf(element) >= 0) continue;
@@ -913,7 +995,7 @@
     return result;
   }
 
-  function controlLabel(element, index) {
+  function controlLabel(element: FormControl, index: number): string {
     var id = element.id ? '#' + element.id : (element.dataset && element.dataset.state ? '[data-state=' + element.dataset.state + ']' : '');
     var aria = element.getAttribute ? String(element.getAttribute('aria-label') || '').trim() : '';
     var text = String(element.textContent || '').replace(/\s+/g, ' ').trim();
@@ -922,7 +1004,7 @@
       + (aria || text ? '，' + (aria || text).slice(0, 40) : '') + '）';
   }
 
-  function controlInfo(element, index) {
+  function controlInfo(element: FormControl, index: number): ControlInfo {
     return {
       index: index,
       tag: String(element.tagName || '').toLowerCase(),
@@ -932,14 +1014,15 @@
     };
   }
 
-  function nextControlValue(control) {
-    if (control.type === 'checkbox') return !control.checked;
+  function nextControlValue(control: FormControl): string | number | boolean | null {
+    if (control.type === 'checkbox') return !(control as HTMLInputElement).checked;
     if (control.type === 'range' || control.type === 'number') {
-      var value = Number(control.value);
-      var min = Number(control.min);
-      var max = Number(control.max);
+      var input = control as HTMLInputElement;
+      var value = Number(input.value);
+      var min = Number(input.min);
+      var max = Number(input.max);
       if (Number.isFinite(min) && Number.isFinite(max) && min !== max) {
-        var configuredStep = Number(control.step);
+        var configuredStep = Number(input.step);
         var delta = Number.isFinite(configuredStep) && configuredStep > 0 ? configuredStep : Math.abs(max - min) / 10;
         var forward = value + delta;
         if (forward <= max && forward !== value) return forward;
@@ -950,18 +1033,19 @@
       return value + 1;
     }
     if (control.tagName === 'SELECT') {
-      return control.options.length > 1 ? (control.selectedIndex + 1) % control.options.length : null;
+      const select = control as HTMLSelectElement;
+      return select.options.length > 1 ? (select.selectedIndex + 1) % select.options.length : null;
     }
     return control.value && control.value.trim() ? control.value + ' 测试' : '测试';
   }
 
-  function writeProbeValue(control, value) {
-    if (control.type === 'checkbox') control.checked = Boolean(value);
-    else if (control.tagName === 'SELECT') control.selectedIndex = value;
+  function writeProbeValue(control: FormControl, value: AnyValue): void {
+    if (control.type === 'checkbox') (control as HTMLInputElement).checked = Boolean(value);
+    else if (control.tagName === 'SELECT') (control as HTMLSelectElement).selectedIndex = value;
     else control.value = String(value);
   }
 
-  function fireControl(control) {
+  function fireControl(control: FormControl): void {
     control.dispatchEvent(new Event('input', { bubbles: true }));
     control.dispatchEvent(new Event('change', { bubbles: true }));
   }
@@ -970,12 +1054,12 @@
     return typeof document.getAnimations === 'function' && document.getAnimations().length > 0;
   }
 
-  function waitForQuiet(target, quietMs, maxMs, minMs) {
-    return new Promise(function (resolve) {
+  function waitForQuiet(target: Node | null, quietMs: number, maxMs: number, minMs?: number): Promise<{ quiet: boolean; elapsed: number }> {
+    return new Promise<{ quiet: boolean; elapsed: number }>(function (resolve) {
       var start = now();
       var minimum = Math.max(0, Number(minMs) || 0);
       var lastMutation = now();
-      var observer = null;
+      var observer: MutationObserver | null = null;
       try {
         observer = new MutationObserver(function () { lastMutation = now(); });
         observer.observe(target || document.documentElement, {
@@ -1006,8 +1090,8 @@
     });
   }
 
-  function waitWhen(predicate, timeoutMs) {
-    return new Promise(function (resolve) {
+  function waitWhen(predicate: () => boolean, timeoutMs: number): Promise<{ ok: boolean; elapsed: number }> {
+    return new Promise<{ ok: boolean; elapsed: number }>(function (resolve) {
       var start = now();
       var timer = setInterval(function () {
         var current = now();
@@ -1021,16 +1105,16 @@
     });
   }
 
-  function resolveTarget(selector) {
+  function resolveTarget(selector: string): FormControl | null {
     if (!selector || typeof selector !== 'string') return null;
     try {
-      return document.querySelector(selector);
+      return document.querySelector<FormControl>(selector);
     } catch (error) {
       return null;
     }
   }
 
-  function caseTargets(caseValue) {
+  function caseTargets(caseValue: RuntimeConfig | undefined): string[] {
     if (!caseValue || !Array.isArray(caseValue.actions)) return [];
     var targets = [];
     for (var index = 0; index < caseValue.actions.length; index += 1) {
@@ -1043,8 +1127,8 @@
     return targets;
   }
 
-  function waitForReady() {
-    return new Promise(function (resolve) {
+  function waitForReady(): Promise<{ ready: boolean; elapsed: number }> {
+    return new Promise<{ ready: boolean; elapsed: number }>(function (resolve) {
       var start = now();
       var initial = observableSnapshot();
       var timer = setInterval(function () {
@@ -1077,27 +1161,28 @@
     });
   }
 
-  function setControlValue(control, value) {
+  function setControlValue(control: FormControl, value: AnyValue): boolean {
     if (!control) return false;
     if (control.tagName === 'SELECT') {
+      const select = control as HTMLSelectElement;
       var matched = false;
-      for (var index = 0; index < control.options.length; index += 1) {
-        if (control.options[index].value === value) {
-          control.selectedIndex = index;
+      for (var index = 0; index < select.options.length; index += 1) {
+        if (select.options[index].value === value) {
+          select.selectedIndex = index;
           matched = true;
           break;
         }
       }
       if (!matched) {
         var numeric = Number(value);
-        if (Number.isInteger(numeric) && numeric >= 0 && numeric < control.options.length) {
-          control.selectedIndex = numeric;
+        if (Number.isInteger(numeric) && numeric >= 0 && numeric < select.options.length) {
+          select.selectedIndex = numeric;
           matched = true;
         }
       }
       if (!matched) return false;
     } else if (control.type === 'checkbox' || control.type === 'radio') {
-      control.checked = value === 'true' ? true : value === 'false' ? false : Boolean(value);
+      (control as HTMLInputElement).checked = value === 'true' ? true : value === 'false' ? false : Boolean(value);
     } else {
       control.value = String(value);
     }
@@ -1105,7 +1190,7 @@
     return true;
   }
 
-  async function waitForCompletion(completion) {
+  async function waitForCompletion(completion: RuntimeConfig | undefined): Promise<boolean> {
     if (!completion) return (await waitForQuiet(null, LIMITS.settleMs, LIMITS.actionTimeoutMs, 350)).quiet;
     if (completion.type === 'quiet') {
       return (await waitForQuiet(completion.target ? resolveTarget(completion.target) : null, completion.ms, LIMITS.actionTimeoutMs)).quiet;
@@ -1132,12 +1217,20 @@
     return false;
   }
 
-  function pushStep(step) {
+  function pushStep(step: EvidenceStep): void {
     evidence.totalSteps += 1;
     evidence.steps.push(step);
   }
 
-  function probeStep(control, index, before, beforeText, beforeGraphics, action, waitedMs) {
+  function probeStep(
+    control: FormControl,
+    index: number,
+    before: { html: string; value: string },
+    beforeText: string,
+    beforeGraphics: string,
+    action: string,
+    waitedMs: number,
+  ) {
     var afterGraphics = graphicsSnapshot();
     var afterHtml = document.body ? document.body.innerHTML : '';
     var afterText = visibleTextSnapshot();
@@ -1189,7 +1282,7 @@
   }
 
   async function waitForFirstPaint() {
-    await new Promise(function (resolve) {
+    await new Promise<void>(function (resolve) {
       var settled = false;
       var finish = function () {
         if (settled) return;
@@ -1204,7 +1297,7 @@
       // 离屏 iframe 可能不产生 rAF；必须用计时器兜底，不能把首屏等待变成死锁。
       setTimeout(finish, 80);
     });
-    var canvases = Array.from(document.querySelectorAll('.rs-stage canvas, canvas.rs-chart'));
+    var canvases = Array.from(document.querySelectorAll<HTMLCanvasElement>('.rs-stage canvas, canvas.rs-chart'));
     var marked = canvases.filter(function (canvas) {
       return isVisible(canvas) && canvas.hasAttribute('data-visual-content');
     });
@@ -1550,7 +1643,6 @@
   async function runValidation() {
     if (!TESTING || finished) return;
     validating = true;
-    startedAt = now();
     evidence.phase = '准备验收';
     post(MSG.validationStart, { mode: CONFIG.mode });
     try {
@@ -1592,7 +1684,7 @@
         finish('无需验收');
       }
     } catch (error) {
-      var message = error && error.message ? error.message : String(error);
+      var message = error instanceof Error ? error.message : String(error);
       addIssue(ISSUE.protocolViolation, 'validator', 'advisory', '验收执行异常：' + message.slice(0, 300), errorDiagnostics(error, message, 0, 0));
       evidence.diagnostics = errorDiagnostics(error, message, 0, 0);
       finish('验收执行异常');
@@ -1603,30 +1695,30 @@
     if (initialized) return;
     try {
       syncText();
-      document.querySelectorAll('[data-state]').forEach(function (control) {
-        var key = control.dataset.state;
+      document.querySelectorAll<HTMLInputElement>('[data-state]').forEach(function (control) {
+        const key = control.dataset.state;
         if (!key) return;
         state[key] = readControl(control);
         control.addEventListener('input', function () {
-          var patch = {};
+          var patch: Record<string, AnyValue> = {};
           patch[key] = readControl(control);
           commit(patch);
         });
       });
-      document.querySelectorAll('[data-action]').forEach(function (button) {
+      document.querySelectorAll<HTMLElement>('[data-action]').forEach(function (button) {
         button.addEventListener('click', function (event) {
           event.preventDefault();
           var action = button.dataset.action;
-          if (typeof window.interactiveAction !== 'function') return;
+          if (typeof HOST.interactiveAction !== 'function') return;
           try {
-            var patch = window.interactiveAction(action, Object.assign({}, state));
+            var patch = HOST.interactiveAction(action, Object.assign({}, state));
             if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
               showError('动作“' + action + '”没有返回有效的状态更新');
               return;
             }
             commit(patch);
           } catch (error) {
-            recordError(error, error && error.message ? error.message : String(error), 0, 0);
+            recordError(error, error instanceof Error ? error.message : String(error), 0, 0);
           }
         });
       });
@@ -1639,7 +1731,7 @@
         setTimeout(function () { runValidation(); }, 0);
       }
     } catch (error) {
-      var initMessage = error && error.message ? error.message : String(error);
+      var initMessage = error instanceof Error ? error.message : String(error);
       recordError(error, initMessage, 0, 0);
       if (TESTING) {
         addIssue(ISSUE.runtimeError, 'runtime', 'blocking', '页面初始化失败：' + initMessage.slice(0, 300),

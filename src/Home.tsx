@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { deleteSessionRecord, listSessionRecords } from './session-library.ts';
-import type { SessionRecord } from './session-library.ts';
+import type { SessionSummary } from './session-library.ts';
 import { discardSessionCache, useStore } from './store.ts';
 import resproutLogo from '../assets/brand/resprout-wordmark-light.png';
 
 interface SessionHomeProps {
   onNew: () => void;
-  onOpen: (id: string) => void;
+  onOpen: (id: string) => void | Promise<void>;
 }
 
 function errorMessage(cause: unknown): string {
@@ -26,16 +26,24 @@ function formatUpdatedAt(value: string): string {
 }
 
 export default function SessionHome({ onNew, onOpen }: SessionHomeProps) {
-  const [records, setRecords] = useState<SessionRecord[]>(listSessionRecords);
+  const [records, setRecords] = useState<SessionSummary[]>([]);
   const [error, setError] = useState('');
   const generationRuns = useStore(state => state.generationRuns);
 
-  useEffect(() => setRecords(listSessionRecords()), [generationRuns]);
+  useEffect(() => { void refresh(); }, [generationRuns]);
 
-  function open(id: string) {
+  async function refresh(): Promise<void> {
+    try {
+      setRecords(await listSessionRecords());
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }
+
+  async function open(id: string) {
     setError('');
     try {
-      onOpen(id);
+      await onOpen(id);
     } catch (cause) {
       setError(errorMessage(cause));
     }
@@ -45,7 +53,7 @@ export default function SessionHome({ onNew, onOpen }: SessionHomeProps) {
     if (!window.confirm(`确定删除会话“${title}”？此操作不可撤销。`)) return;
     discardSessionCache(id);
     await deleteSessionRecord(id);
-    setRecords(listSessionRecords());
+    await refresh();
   }
 
   return (

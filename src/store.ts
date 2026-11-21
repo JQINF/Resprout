@@ -60,12 +60,13 @@ import type {
   SessionSnapshot,
   Usage,
 } from './session.ts';
-import { findFreePosition, makeRoomForChild, makeRoomForMultiChildren, makeRoomForPosition } from './node-placement.ts';
+import { makeRoomForChild, makeRoomForMultiChildren, makeRoomForPosition } from './node-placement.ts';
 import { deletePdfFile, savePdfFile } from './pdf-store.ts';
-import { saveSessionSnapshot } from './session-library.ts';
+import { assetReferencedByOtherSessions, hasSessionRecord, saveSessionSnapshot } from './session-library.ts';
 
 const interactiveDiagnostics = new DiagnosticBundleStore(24);
 const generationControllers = new Map<string, { controller: AbortController; runId: string }>();
+const reconciliationTokens = new Map<string, symbol>();
 
 export type ProviderKind = PublicProvider['kind'];
 export type ProviderInfo = PublicProvider;
@@ -414,7 +415,8 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     set(state => {
       const nodeType: NodeType = sourceId ? 'question' : state.nodes.length === 0 ? 'root' : 'chat';
       const source = sourceId ? state.nodes.find(node => node.id === sourceId) ?? null : null;
-      const position = findFreePosition({ x: center.x - 140, y: center.y - 60 }, { w: 280, h: 120 }, state.nodes);
+      const placement = makeRoomForPosition({ x: center.x - 140, y: center.y - 60 }, { w: 280, h: 120 }, state.nodes.filter(node => node.id !== sourceId));
+      const position = placement.position;
       const data: ConversationNodeData = {
         nodeType,
         role: 'user',
@@ -425,7 +427,10 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         autoFocus: true,
         createdAt: Date.now(),
       };
-      const nodes: ConversationNode[] = [...state.nodes, { id, type: 'conversation', position, data }];
+      const nodes: ConversationNode[] = state.nodes.map((node): ConversationNode => {
+        const relocated = placement.relocations.get(node.id);
+        return relocated ? { ...node, position: relocated } : node;
+      }).concat({ id, type: 'conversation', position, data });
       const edges: ConversationEdge[] = sourceId ? [...state.edges, {
         id: crypto.randomUUID(),
         source: sourceId,
@@ -444,15 +449,19 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         const useWidth = width ?? 208;
         const useHeight = height ?? 104;
         set(state => {
-          const siblings = state.nodes.filter(item => item.id !== id);
+          const siblings = state.nodes.filter(item => item.id !== id && item.id !== sourceId);
           const size = { w: useWidth, h: useHeight };
-          const position = findFreePosition(
+          const placement = makeRoomForPosition(
             { x: center.x - useWidth / 2, y: center.y - useHeight / 2 },
             size,
             siblings,
           );
           return {
-            nodes: state.nodes.map((item): ConversationNode => item.id === id ? { ...item, position } : item),
+            nodes: state.nodes.map((item): ConversationNode => {
+              if (item.id === id) return { ...item, position: placement.position };
+              const relocated = placement.relocations.get(item.id);
+              return relocated ? { ...item, position: relocated } : item;
+            }),
           };
         });
         return;
@@ -468,7 +477,8 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     set(state => {
       const defaultSize = kind === 'interactive' ? DEFAULT_MULTI_INTERACTIVE_SIZE : DEFAULT_MULTI_MODEL_SIZE;
       const size = { w: defaultSize.width, h: defaultSize.height };
-      const position = findFreePosition({ x: center.x - size.w / 2, y: center.y - size.h / 2 }, size, state.nodes);
+      const placement = makeRoomForPosition({ x: center.x - size.w / 2, y: center.y - size.h / 2 }, size, state.nodes.filter(node => node.id !== sourceId));
+      const position = placement.position;
       const source = sourceId ? state.nodes.find(node => node.id === sourceId) ?? null : null;
       const initialModel = source?.data.model ?? state.activeProvider;
       const models = initialModel ? [initialModel] : [];
@@ -483,13 +493,16 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         error: '',
         createdAt: Date.now(),
       };
-      const nodes: ConversationNode[] = [...state.nodes, {
+      const nodes: ConversationNode[] = state.nodes.map((node): ConversationNode => {
+        const relocated = placement.relocations.get(node.id);
+        return relocated ? { ...node, position: relocated } : node;
+      }).concat({
         id,
         type: 'multi',
         position,
         style: { width: size.w, height: size.h },
         data,
-      }];
+      });
       const edges: ConversationEdge[] = sourceId ? [...state.edges, {
         id: crypto.randomUUID(),
         source: sourceId,
@@ -509,7 +522,8 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     await savePdfFile(id, file);
     set(state => {
       const size = { w: 600, h: 680 };
-      const position = findFreePosition({ x: center.x - size.w / 2, y: center.y - size.h / 2 }, size, state.nodes);
+      const placement = makeRoomForPosition({ x: center.x - size.w / 2, y: center.y - size.h / 2 }, size, state.nodes);
+      const position = placement.position;
       const data: ConversationNodeData = {
         nodeType: 'reference',
         role: 'reference',
@@ -527,13 +541,16 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         highlights: [],
       };
       return {
-        nodes: [...state.nodes, {
+        nodes: state.nodes.map((node): ConversationNode => {
+          const relocated = placement.relocations.get(node.id);
+          return relocated ? { ...node, position: relocated } : node;
+        }).concat({
           id,
           type: 'pdf',
           position,
           style: { width: size.w, height: size.h },
           data,
-        }],
+        }),
       };
     });
     return id;
@@ -546,7 +563,8 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     await savePdfFile(id, file);
     set(state => {
       const size = { w: 440, h: 460 };
-      const position = findFreePosition({ x: center.x - size.w / 2, y: center.y - size.h / 2 }, size, state.nodes);
+      const placement = makeRoomForPosition({ x: center.x - size.w / 2, y: center.y - size.h / 2 }, size, state.nodes);
+      const position = placement.position;
       const data: ConversationNodeData = {
         nodeType: 'reference',
         role: 'reference',
@@ -563,13 +581,16 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         highlights: [],
       };
       return {
-        nodes: [...state.nodes, {
+        nodes: state.nodes.map((node): ConversationNode => {
+          const relocated = placement.relocations.get(node.id);
+          return relocated ? { ...node, position: relocated } : node;
+        }).concat({
           id,
           type: 'image',
           position,
           style: { width: size.w, height: size.h },
           data,
-        }],
+        }),
       };
     });
     return id;
@@ -637,7 +658,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         : { w: 300, h: 140 };
       const initialModel = source.data.model ?? state.activeProvider;
       const models = multi && initialModel ? [initialModel] : [];
-      const occupants = placementOccupants(state.nodes, state.edges);
+      const occupants = placementOccupants(state.nodes, state.edges).filter(node => node.id !== sourceId);
       const placement = preferredPosition
         ? makeRoomForPosition(preferredPosition, size, occupants)
         : makeRoomForChild(source, size, occupants, anchor?.y ?? 0);
@@ -761,10 +782,15 @@ export const useStore = create<ResproutStore>()((set, get) => ({
 
     const id = existing?.id ?? crypto.randomUUID();
     const size = { w: DEFAULT_INTERACTIVE_SIZE.width, h: DEFAULT_INTERACTIVE_SIZE.height };
-    const position = existing ? existing.position : options.position ?? findFreePosition({
-      x: flowPosition.x - size.w / 2,
-      y: flowPosition.y - size.h / 2,
-    }, size, current.nodes);
+    const placement = existing
+      ? { position: existing.position, relocations: new Map<string, XYPosition>() }
+      : options.position
+        ? { position: options.position, relocations: new Map<string, XYPosition>() }
+        : makeRoomForPosition({
+            x: flowPosition.x - size.w / 2,
+            y: flowPosition.y - size.h / 2,
+          }, size, current.nodes.filter(node => node.id !== sourceId));
+    const position = placement.position;
     const selectedModel = existing?.data.model ?? options.model ?? source.data.model ?? current.activeProvider;
     const existingSourceEdge = existing ? current.edges.find(edge => edge.target === existing.id) : null;
     const selectedText = String(selection?.quote || existingSourceEdge?.data?.quote || '').trim();
@@ -827,13 +853,16 @@ export const useStore = create<ResproutStore>()((set, get) => ({
           generationDiagnostic: null,
           createdAt: Date.now(),
         };
-        const nodes: ConversationNode[] = [...state.nodes, {
+        const nodes: ConversationNode[] = state.nodes.map((node): ConversationNode => {
+          const relocated = placement.relocations.get(node.id);
+          return relocated ? { ...node, position: relocated } : node;
+        }).concat({
           id,
           type: 'interactive',
           position,
           style: { width: size.w, height: size.h },
           data,
-        }];
+        });
         const edges: ConversationEdge[] = [...state.edges, {
           id: crypto.randomUUID(),
           source: sourceId,
@@ -1072,7 +1101,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         ...state,
         nodes: state.nodes.map((node): ConversationNode => node.id === id ? { ...node, data: { ...node.data, pending: false } } : node),
       }));
-      try { persistGenerationSession(sessionId); } catch {}
+      void persistGenerationSession(sessionId).catch(() => {});
     }
   },
 
@@ -1170,7 +1199,7 @@ export const useStore = create<ResproutStore>()((set, get) => ({
     const answerSize = { w: DEFAULT_ANSWER_SIZE.width, h: DEFAULT_ANSWER_SIZE.height };
     const placement = options.position
       ? { position: options.position, relocations: new Map<string, XYPosition>() }
-      : makeRoomForChild(source, answerSize, placementOccupants(current.nodes, current.edges));
+      : makeRoomForChild(source, answerSize, placementOccupants(current.nodes, current.edges).filter(node => node.id !== source.id));
     const position = placement.position;
     const selectedModel = options.model ?? source.data.model ?? current.activeProvider;
     const answerId = crypto.randomUUID();
@@ -1348,7 +1377,17 @@ export const useStore = create<ResproutStore>()((set, get) => ({
         interactiveDiagnostics.delete(`${sessionId}:${nodeId}`);
       }
       for (const node of get().nodes) {
-        if (removed.has(node.id) && node.data.role === 'reference' && node.data.fileId) void deletePdfFile(node.data.fileId).catch(() => {});
+        if (!removed.has(node.id)) continue;
+        const assets = new Set([
+          node.data.role === 'reference' ? node.data.fileId : null,
+          node.data.imageAssetId,
+        ]);
+        for (const fileId of assets) {
+          if (!fileId) continue;
+          void (async () => {
+            if (!await assetReferencedByOtherSessions(fileId, sessionId)) await deletePdfFile(fileId);
+          })().catch(() => {});
+        }
       }
     }
     set(state => {
@@ -1386,32 +1425,40 @@ export const useStore = create<ResproutStore>()((set, get) => ({
 
   async reconcileSession() {
     const sessionId = get().session.id;
+    const token = Symbol(sessionId);
+    reconciliationTokens.set(sessionId, token);
     try {
-      const { runs } = await reconcileRunsRequest(sessionId);
-      if (get().session.id !== sessionId) return;
-      const byId = new Map<string, RunSnapshot>();
-      for (const run of runs) byId.set(run.requestId, run);
-      set(state => ({
-        nodes: state.nodes.map((node): ConversationNode => {
-          const run = byId.get(node.id);
-          if (!run || node.data.role !== 'assistant') return node;
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              content: run.text || node.data.content,
-              pending: run.status === 'running',
-              error: run.error || '',
-              usage: run.usage ?? node.data.usage,
-            },
-          };
-        }),
-        edges: state.edges.map((edge): ConversationEdge => {
-          const run = byId.get(edge.target);
-          return run ? { ...edge, data: { ...edge.data, thinking: run.thinking || edge.data.thinking, streaming: run.status === 'running', error: run.error || '' } } : edge;
-        }),
-      }));
-    } catch {}
+      while (reconciliationTokens.get(sessionId) === token && get().session.id === sessionId) {
+        const { runs } = await reconcileRunsRequest(sessionId);
+        if (reconciliationTokens.get(sessionId) !== token || get().session.id !== sessionId) return;
+        const byId = new Map<string, RunSnapshot>();
+        for (const run of runs) byId.set(run.requestId, run);
+        set(state => ({
+          nodes: state.nodes.map((node): ConversationNode => {
+            const run = byId.get(node.id);
+            if (!run || node.data.role !== 'assistant') return node;
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                content: run.text || node.data.content,
+                pending: run.status === 'running',
+                error: run.error || '',
+                usage: run.usage ?? node.data.usage,
+              },
+            };
+          }),
+          edges: state.edges.map((edge): ConversationEdge => {
+            const run = byId.get(edge.target);
+            return run ? { ...edge, data: { ...edge.data, thinking: run.thinking || edge.data.thinking, streaming: run.status === 'running', error: run.error || '' } } : edge;
+          }),
+        }));
+        if (!runs.some(run => run.status === 'running')) return;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    } catch {} finally {
+      if (reconciliationTokens.get(sessionId) === token) reconciliationTokens.delete(sessionId);
+    }
   },
 
   loadSession(value) {
@@ -1478,19 +1525,18 @@ function isCurrentGeneration(sessionId: string, nodeId: string, kind: Generation
   return Boolean(entry && entry.runId === runId);
 }
 
-function persistGenerationSession(sessionId: string): void {
+async function persistGenerationSession(sessionId: string): Promise<void> {
   if (discardedSessions.has(sessionId)) return;
   const state = useStore.getState();
   const snapshot = state.session.id === sessionId ? sessionSnapshot(state) : sessionCache.get(sessionId);
-  if (snapshot?.nodes.length) {
-    saveSessionSnapshot(exportSessionSnapshot(snapshot.session, snapshot.nodes, snapshot.edges));
+  if (snapshot && (snapshot.nodes.length > 0 || await hasSessionRecord(sessionId))) {
+    await saveSessionSnapshot(exportSessionSnapshot(snapshot.session, snapshot.nodes, snapshot.edges));
   }
 }
 
 function finishGeneration(sessionId: string, nodeId: string, kind: GenerationRunKind, runId: string): void {
   try {
-    persistGenerationSession(sessionId);
-  } catch {
+    void persistGenerationSession(sessionId).catch(() => {});
   } finally {
     const key = generationRunKey(sessionId, nodeId, kind);
     const entry = generationControllers.get(key);

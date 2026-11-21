@@ -73,6 +73,7 @@ export default function ImageNode({ id, data, selected }: NodeProps<Conversation
   const nodeRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  const relinkInputRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<ImageDrag | null>(null);
   const [imageUrl, setImageUrl] = useState('');
   const [aspectRatio, setAspectRatio] = useState(1);
@@ -81,6 +82,7 @@ export default function ImageNode({ id, data, selected }: NodeProps<Conversation
   const [question, setQuestion] = useState('');
   const [selectionCopied, setSelectionCopied] = useState(false);
   const [error, setError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
   const fileId = data.fileId ?? '';
   const fileName = data.fileName ?? '';
   const selectedModel = data.model ?? activeProvider;
@@ -141,7 +143,7 @@ export default function ImageNode({ id, data, selected }: NodeProps<Conversation
     finishSelection();
     readPdfFile(fileId).then((record: StoredPdfFile | null) => {
       if (!record) {
-        if (active) setError('没有找到图片原件，请重新拖入');
+        if (active) setError(`没有找到图片《${fileName}》原件，请重新关联附件。`);
         return;
       }
       objectUrl = URL.createObjectURL(record.blob);
@@ -154,7 +156,7 @@ export default function ImageNode({ id, data, selected }: NodeProps<Conversation
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId]);
+  }, [fileId, reloadKey, fileName]);
 
   useEffect(() => {
     if (!selection) return;
@@ -300,6 +302,20 @@ export default function ImageNode({ id, data, selected }: NodeProps<Conversation
     }
   }
 
+  async function relinkImage(file: File | undefined): Promise<void> {
+    if (!file || !fileId) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      setError('只支持 PNG、JPEG、WebP 图片');
+      return;
+    }
+    try {
+      await savePdfFile(fileId, file);
+      setReloadKey(value => value + 1);
+    } catch (cause) {
+      setError(`附件保存失败：${errorMessage(cause)}`);
+    }
+  }
+
   return (
     <div ref={nodeRef} className={`conversation-node assistant image-node ${selected ? 'selected' : ''}`}>
       <Handle type="target" position={Position.Left} />
@@ -307,7 +323,12 @@ export default function ImageNode({ id, data, selected }: NodeProps<Conversation
       <NodeResizeCorners id={id} minWidth={120} minHeight={80} aspectRatio={aspectRatio} onResizeStart={finishSelection} />
       <NodeCard className="assistant image-card">
         <div ref={previewRef} className="image-preview nodrag nowheel">
-          {imageUrl ? <img ref={imageRef} src={imageUrl} alt={fileName} onLoad={event => resizeNode(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} /> : <div className="image-status">{error || '正在读取图片…'}</div>}
+          {imageUrl ? <img ref={imageRef} src={imageUrl} alt={fileName} onLoad={event => resizeNode(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)} /> : (
+            <div className="image-status">
+              <span>{error || '正在读取图片…'}</span>
+              {error.includes('没有找到图片') && <button type="button" onClick={() => relinkInputRef.current?.click()}>重新关联附件</button>}
+            </div>
+          )}
           {imageUrl && (
             <div
               className="image-select-surface"
@@ -332,6 +353,16 @@ export default function ImageNode({ id, data, selected }: NodeProps<Conversation
           {preview && <div className="image-selection-box" style={{ left: `${preview.x * 100}%`, top: `${preview.y * 100}%`, width: `${preview.w * 100}%`, height: `${preview.h * 100}%`, borderColor: previewColor, background: `${previewColor}24` }} />}
         </div>
       </NodeCard>
+      <input
+        ref={relinkInputRef}
+        hidden
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        onChange={event => {
+          void relinkImage(event.target.files?.[0]);
+          event.target.value = '';
+        }}
+      />
       <Handle type="source" position={Position.Right} />
       {selection && createPortal(
         <div className="quote-popup image-quote-popup nodrag nowheel" style={{ left: selection.left, top: selection.top }}>

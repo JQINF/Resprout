@@ -10,7 +10,7 @@ import type { Paragraph, Root, Text as MdastText } from 'mdast';
 import type { InlineMath, Math as MathNode } from 'mdast-util-math';
 import type { Node as UnistNode } from 'unist';
 import type { Plugin } from 'unified';
-import { looksLikeCode, normalizeMarkdown, normalizeMathSource, unicodeMathPattern } from './markdown-normalize.ts';
+import { looksLikeCode, looksLikeDiagram, normalizeMarkdown, normalizeMathSource, unicodeMathPattern } from './markdown-normalize.ts';
 import 'highlight.js/styles/github.css';
 import 'katex/dist/katex.min.css';
 
@@ -151,7 +151,7 @@ const remarkBareMath: Plugin<[], Root> = () => (tree: Root): void => {
         if (text && isText(text)) {
           const value = text.value.trim();
           const startsWithMath = /^(?:\\|[A-Za-z](?:\s*[=^_]|\())/.test(value);
-          if (value && startsWithMath && /\\[A-Za-z]+/.test(value) && !/[`$]/.test(value) && !/\p{Script=Han}/u.test(value) && !looksLikeCode(value)) {
+          if (value && startsWithMath && /\\[A-Za-z]+/.test(value) && !/[`$]/.test(value) && !/\p{Script=Han}/u.test(value) && !looksLikeCode(value) && !looksLikeDiagram(value)) {
             const mathNode: MathNode = {
               type: 'math',
               value,

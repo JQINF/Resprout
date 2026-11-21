@@ -45,13 +45,13 @@ You need **Node.js 22.19 or newer**.
 Run directly without installing:
 
 ```bash
-npx --yes resprout@alpha
+npx --yes resprout
 ```
 
 Or install the command globally:
 
 ```bash
-npm install -g resprout@alpha
+npm install -g resprout
 resprout
 ```
 

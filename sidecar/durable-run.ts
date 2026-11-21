@@ -38,6 +38,7 @@ import type { ProviderConfig } from './provider-store.ts';
 import { runSearchTool, WEB_SEARCH_TOOLS } from './web-search.ts';
 import { FETCH_TOOLS, messagesNeedFetch, runFetchTool } from './web-fetch.ts';
 import { ANSWER_SYSTEM_PROMPT } from './answer-discipline.ts';
+import { scanDocumentsAll } from './durable-pagination.ts';
 
 const durableRoot = resolve(process.env.RESPROUT_CONFIG_DIR ?? '.resprout', 'durable');
 
@@ -654,25 +655,24 @@ export async function reconcileRuns(sessionId: string): Promise<RunResult[]> {
     if (!selection) continue;
     const { provider } = selection;
     const { harness, storage } = await getHarness(provider);
-    const page = await storage.scanDocuments({
+    await scanDocumentsAll(storage, {
       scope: { kind: 'session' },
       kind: 'resprout.run',
       at: 'current',
-    }, 1000, undefined, BACKGROUND_CONTEXT);
-    for (const record of page.items) {
+    }, 1000, BACKGROUND_CONTEXT, async record => {
       const stored = await storage.document(record.id, 'current', BACKGROUND_CONTEXT);
-      if (!stored || !isRecord(stored.value)) continue;
+      if (!stored || !isRecord(stored.value)) return;
       const index = stored.value as RunIndex;
-      if (index.sessionId !== sessionId) continue;
+      if (index.sessionId !== sessionId) return;
       const taskId = readId<TaskId<AnswerResult>>(index.taskId);
       if (taskId) {
         const task = await harness.getTask(taskId, BACKGROUND_CONTEXT);
         if (task) runs.push(runResult(task, index.requestId));
-        continue;
+        return;
       }
       const result = await conversationRunResult(harness, index);
       if (result) runs.push(result);
-    }
+    });
   }
   return runs;
 }
